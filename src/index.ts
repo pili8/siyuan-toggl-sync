@@ -28,6 +28,8 @@ import {
     openAttributePanel,
     saveLayout,
     IMenuItem,
+    IKernelPluginState,
+    IKernelPluginRpcCall,
 } from "siyuan";
 import "./index.scss";
 
@@ -56,6 +58,10 @@ export default class PluginSample extends Plugin {
     }
 
     onload() {
+        this.kernel.rpc.bind("unload", this.onKernelPluginUnload);
+        this.kernel.rpc.bind("notify", this.onKernelPluginNotify);
+        this.eventBus.on("kernel-plugin-state-change", this.onKernelPluginStateChange);
+
         this.data[STORAGE_NAME] = {readonlyText: "Readonly"};
 
         const frontEnd = getFrontend();
@@ -261,6 +267,10 @@ export default class PluginSample extends Plugin {
 
     onunload() {
         console.log(this.i18n.byePlugin);
+
+        this.kernel.rpc.unbind("unload", this.onKernelPluginUnload);
+        this.kernel.rpc.unbind("notify", this.onKernelPluginNotify);
+        this.eventBus.off("kernel-plugin-state-change", this.onKernelPluginStateChange);
     }
 
     uninstall() {
@@ -318,18 +328,75 @@ export default class PluginSample extends Plugin {
     }
     */
 
-    private eventBusPaste(event: any) {
+    private readonly eventBusPaste = (event: any) => {
         // 如果需异步处理请调用 preventDefault， 否则会进行默认处理
         event.preventDefault();
         // 如果使用了 preventDefault，必须调用 resolve，否则程序会卡死
         event.detail.resolve({
             textPlain: event.detail.textPlain.trim(),
         });
-    }
+    };
 
-    private eventBusLog({detail}: any) {
+    private readonly eventBusLog = ({detail}: any) => {
         console.log(detail);
-    }
+    };
+
+    private readonly onKernelPluginStateChange = async ({detail}: CustomEvent<IKernelPluginState>) => {
+        console.log("kernel-plugin-state-change", detail);
+        switch (detail.code) {
+            case 2: { // running
+                const params = ["param 1", "param 2"];
+                await this.kernel.rpc.notify["echo-notify"](...params);
+
+                const result = await this.kernel.rpc.call.echo(...params);
+                console.group("JSON RPC client -> kernel: call [echo] method");
+                console.log("params:", params);
+                console.log("result:", result);
+                console.groupEnd();
+
+                const request: IKernelPluginRpcCall[] = [
+                    { // call with custom id
+                        id: 0,
+                        method: "echo",
+                        params: {key1: "value1"},
+                    },
+                    { // call with auto-generated id
+                        method: "echo",
+                        params: ["key2", "value2"],
+                    },
+                    { // notify will not have response and id
+                        method: "echo-notify",
+                        params: {key3: "value3"},
+                        notification: true,
+                    },
+                    { // notify will remove id even if it is set
+                        id: "3",
+                        method: "echo-notify",
+                        params: ["key4", "value4"],
+                        notification: true,
+                    },
+                ];
+                const response = await this.kernel.rpc.batch(...request);
+                console.group("JSON RPC client -> kernel: batch call [echo] and [notify] method");
+                console.log("request:", request);
+                console.log("response:", response);
+                console.groupEnd();
+                break;
+            }
+        }
+    };
+
+    private onKernelPluginUnload = async (...params: any[]) => {
+        console.group("JSON RPC kernel -> client: unload");
+        console.log("params:", params);
+        console.groupEnd();
+    };
+
+    private onKernelPluginNotify = async (...params: any[]) => {
+        console.group("JSON RPC kernel -> client: notify");
+        console.log("params:", params);
+        console.groupEnd();
+    };
 
     private blockIconEvent({detail}: any) {
         detail.menu.addItem({
@@ -874,6 +941,18 @@ export default class PluginSample extends Plugin {
                 label: "Off closed-notebook",
                 click: () => {
                     this.eventBus.off("closed-notebook", this.eventBusLog);
+                },
+            }, {
+                icon: "iconSelect",
+                label: "On kernel-plugin-state-change",
+                click: () => {
+                    this.eventBus.on("kernel-plugin-state-change", this.onKernelPluginStateChange);
+                },
+            }, {
+                icon: "iconClose",
+                label: "Off kernel-plugin-state-change",
+                click: () => {
+                    this.eventBus.off("kernel-plugin-state-change", this.onKernelPluginStateChange);
                 },
             }],
         });
