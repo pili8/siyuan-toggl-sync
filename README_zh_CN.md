@@ -1,164 +1,107 @@
-[English](https://github.com/siyuan-note/plugin-sample/blob/main/README.md)
+[English](./README.md)
 
-# 思源笔记插件示例
+# Toggl 同步
 
-## 开始
+把 Toggl 时间条目同步到思源笔记数据库，并支持受控的思源到 Toggl 回写。
 
-* 通过 <kbd>Use this template</kbd> 按钮将该库文件复制到你自己的库中，请注意库名必须和插件名称一致，默认分支必须为 `main`
-* 将你的库克隆到本地开发文件夹中，为了方便可以直接将开发文件夹放置在 `{工作空间}/data/plugins/` 下
-* 安装 [NodeJS](https://nodejs.org/en/download) 和 [pnpm](https://pnpm.io/installation)，然后在开发文件夹下执行 `pnpm i`
-* 执行 `pnpm run dev` 进行实时编译
-* 在思源中打开集市并在下载选项卡中启用插件
+## 功能
+
+* 可在设置中手动新建或挂载目标文档中的 `Toggl Sync` 数据库。
+* 从 Toggl 拉取新增、修改、删除的时间条目。
+* 将标记为 `本地待上传` 的思源本地新条目上传到 Toggl。
+* 通过 `同步状态` 字段控制更新 Toggl、删除 Toggl、清理本地删除项。
+* 状态栏显示本地计时，不持续轮询 Toggl API。
+* 支持自动同步周期：关闭、15 分钟、30 分钟、60 分钟，默认 30 分钟。
+
+## 配置
+
+打开插件设置后填写：
+
+* `API Token`：Toggl 个人 API Token。
+* `目标文档`：用于存放数据库的思源文档 ID。
+* `首次/修复同步范围`：首次导入或手动修复时使用，默认最近 30 天，最多 90 天。
+* `自动同步周期`：日常自动同步间隔，免费版建议保持 30 分钟。
+* `显示文字`：状态栏空闲时显示的文字，默认 `Toggl`。
+
+顶栏按钮只保留日常高频操作：`立即同步`、开始计时、停止计时和补录条目。`首次/修复同步`、`清理本地可删除项` 放在设置页的数据维护中。项目和标签刷新放在开始计时、补录条目的对应输入旁边。
+
+同步时如果目标文档没有数据库，插件只会提示，不会自动创建。请先在设置页点击 `新建数据库` 创建空白数据库。
+
+## 同步逻辑
+
+日常同步使用 Toggl 的增量接口：
+
+```text
+/me/time_entries?since=上次成功同步时间
+```
+
+`since` 按条目的修改时间判断，不按条目发生日期判断。因此，只要 Toggl 条目在上次同步后被新增、修改或删除，即使它本身发生在很久以前，也会被拉取到。
+
+首次同步或手动修复使用 `start_date/end_date` 时间范围，用来导入历史数据或修复本地状态。Toggl 当前限制 `start_date` 不能早于约 3 个月前，所以插件提供 7/30/90 天范围。这个范围不影响之后的日常增量同步。
+
+## 数据库字段
+
+插件会自动补齐这些字段：
+
+| 字段     | 类型      | 说明                |
+| -------- | --------- | ------------------- |
+| 描述     | 文本/主键 | Toggl 条目描述      |
+| TogglID  | 数字      | Toggl time entry ID |
+| 项目     | 文本      | Toggl 项目名称      |
+| 标签     | 多选      | Toggl 标签          |
+| 开始     | 日期      | 开始时间            |
+| 结束     | 日期      | 结束时间            |
+| 日期     | 日期      | 开始日期            |
+| 时长     | 数字      | 秒数                |
+| 时长显示 | 文本      | `h:mm:ss`           |
+| 计费     | 复选框    | 是否计费            |
+| 同步状态 | 单选      | 同步状态和动作      |
+
+## 同步状态
+
+| 状态         | 含义                                   |
+| ------------ | -------------------------------------- |
+| 正常         | 已与 Toggl 对齐                        |
+| 未同步       | 本地新增，尚未上传到 Toggl             |
+| 本地待上传   | 下次同步时上传本地新增条目到 Toggl     |
+| Toggl 待更新 | 下次同步时用本地内容更新 Toggl         |
+| Toggl 待删除 | 下次同步时删除 Toggl 条目              |
+| 本地可删除   | Toggl 已删除或远端删除完成，本地可清理 |
+| 失败         | 本次上传、更新或删除失败               |
+
+本地新增条目没有 `TogglID` 时，插件会默认标记为 `未同步`，但不会自动上传。确认要上传后，请把 `同步状态` 改成 `本地待上传`；上传成功后插件会写回 `TogglID` 并设为 `正常`。
+
+如果 Toggl 删除了某条记录，插件不会立刻硬删除思源行，而是将 `同步状态` 改为 `本地可删除`。确认后可以在设置页点击 `清理本地可删除项`。
+
+## 项目和标签
+
+项目名称会缓存在插件配置中，避免每次同步都请求项目列表。插件会在项目缓存为空、开始计时/补录需要项目列表，或你在开始计时/补录窗口点击 `刷新` 时调用 Toggl 项目 API。
+
+标签会缓存在插件配置中，用于开始计时和补录条目的候选提示。插件会在标签缓存为空，或你在开始计时/补录窗口点击标签旁边的 `刷新` 时调用 `/me/tags`。同步时仍会直接使用 Toggl time entry 返回的 `tags` 字段；本地上传或更新时，则使用思源行里的 `标签` 字段。
+
+## API 调用策略
+
+Toggl 免费版 API 调用额度较低，因此插件尽量减少请求：
+
+* 日常同步：1 次增量拉取，加上必要的本地上传/更新/删除请求。
+* 自动同步：默认 30 分钟一次，且没有变更时不弹提示。
+* 首次/修复同步：仅手动触发，用时间范围重新扫描历史条目。
+* 状态栏计时：主要本地运行，只在启动、开始、停止或手动刷新时请求 API。
+
+Toggl API 文档：
+
+* [Time entries API](https://engineering.toggl.com/docs/track/api/time_entries/)
+* [API rate limits](https://engineering.toggl.com/docs/track/)
 
 ## 开发
 
-* i18n/*
-* icon.png (160*160)
-* index.css
-* index.js
-* plugin.json
-* preview.png (1024*768)
-* README*.md
-* [前端 API](https://github.com/siyuan-note/petal)
-* [后端 API](https://github.com/siyuan-note/siyuan/blob/master/API_zh_CN.md)
-
-## 国际化
-
-国际化方面我们主要考虑的是支持多语言，具体需要完成以下工作：
-
-* 插件自身的元信息，比如插件描述和自述文件
-  * plugin.json 中的 `displayName`、`description` 和 `readme` 字段，以及对应的 README*.md 文件
-* 插件中使用的文本，比如按钮文字和提示信息
-  * src/i18n/*.json 语言配置文件
-  * 代码中使用 `this.i18.key` 获取文本
-
-建议插件至少支持英文和简体中文，这样可以方便更多人使用。不支持的语种不需要在 plugin.json 中的 `displayName`、`description` 和 `readme` 字段中声明。
-
-## plugin.json
-
-一个典型的示例如下：
-
-```json
-{
-  "name": "plugin-sample",
-  "author": "Vanessa",
-  "url": "https://github.com/siyuan-note/plugin-sample",
-  "version": "0.4.2",
-  "minAppVersion": "3.3.0",
-  "backends": ["all"],
-  "frontends": ["all"],
-  "disabledInPublish": false,
-  "displayName": {
-    "default": "Plugin Sample",
-    "zh_CN": "插件示例"
-  },
-  "description": {
-    "default": "This is a plugin development sample",
-    "zh_CN": "这是一个插件开发示例"
-  },
-  "readme": {
-    "default": "README.md",
-    "zh_CN": "README_zh_CN.md"
-  },
-  "funding": {
-    "custom": ["https://ld246.com/sponsor"]
-  },
-  "keywords": [
-    "开发者参考",
-    "developer reference",
-    "示例插件"
-  ]
-}
+```bash
+npm install
+npm run build
 ```
 
-* `name`：插件包名，必须和 GitHub 仓库名一致，且不能与集市中的其他插件重复
-* `author`：插件作者名
-* `url`：插件仓库地址
-* `version`：插件版本号，需要遵循 [semver](https://semver.org/lang/zh-CN/) 规范
-* `minAppVersion`：插件支持的最低思源笔记版本号
-* `disabledInPublish`：使用发布服务时是否禁用该插件，默认为 false，即不禁用
-* `backends`：插件需要的后端环境，可选值为 `windows`, `linux`, `darwin`, `docker`, `android`, `ios`, `harmony` 和 `all`
-  * `windows`：Windows 桌面端
-  * `linux`：Linux 桌面端
-  * `darwin`：macOS 桌面端
-  * `docker`：Docker 端
-  * `android`：Android 端
-  * `ios`：iOS 端
-  * `harmony`：鸿蒙端
-  * `all`：所有环境
-* `frontends`：插件需要的前端环境，可选值为 `desktop`, `desktop-window`, `mobile`, `browser-desktop`, `browser-mobile` 和 `all`
-  * `desktop`：桌面端
-  * `desktop-window`：桌面端页签转换的独立窗口
-  * `mobile`：移动端
-  * `browser-desktop`：桌面端浏览器
-  * `browser-mobile`：移动端浏览器
-  * `all`：所有环境
-* `displayName`：插件名称（纯文本），在插件集市列表中显示
-  * `default`：默认语言，必须存在。如果插件支持英文，此处应使用英文
-  * `zh_CN`、`en_US` 等其他语言：可选
-* `description`：插件描述（纯文本），在插件集市列表中显示
-  * `default`：默认语言，必须存在。如果插件支持英文，此处应使用英文
-  * `zh_CN`、`en_US` 等其他语言：可选
-* `readme`：自述文件名，在插件集市详情页中显示
-  * `default`：默认语言，必须存在。如果插件支持英文，此处应使用英文
-  * `zh_CN`、`en_US` 等其他语言：可选
-* `funding`：插件赞助信息，集市仅显示其中一种
-  * `openCollective`：Open Collective 名称
-  * `patreon`：Patreon 名称
-  * `github`：GitHub 登录名
-  * `custom`：自定义赞助链接列表
-* `keywords`：搜索关键字列表，用于集市搜索功能，补充 `name`、`author`、`displayName`、`description` 字段值以外的搜索关键词
+本地部署到思源插件目录示例：
 
-## 打包
-
-无论使用何种方式编译打包，我们最终需要生成一个 package.zip，它至少包含如下文件：
-
-* i18n/* (如果插件支持多语言，则需要将语言文件打包到该目录下，否则不需要该目录)
-* icon.png (建议尺寸为 160*160、文件大小不超过 20KB)
-* index.css
-* index.js
-* plugin.json
-* preview.png (建议尺寸为 1024*768、文件大小不超过 200KB)
-* README*.md
-
-## 上架集市
-
-* 执行 `pnpm run build` 生成 package.zip
-* 在 GitHub 上创建一个新的发布，使用插件版本号作为 “Tag version”，示例 https://github.com/siyuan-note/plugin-sample/releases
-* 上传 package.zip 作为二进制附件
-* 提交发布
-
-如果是第一次发布版本，还需要创建一个 PR 到 [Community Bazaar](https://github.com/siyuan-note/bazaar) 社区集市仓库，修改该库的 plugins.json。该文件是所有社区插件库的索引，格式为：
-
-```json
-{
-  "repos": [
-    "username/reponame"
-  ]
-}
+```bash
+ditto dist /path/to/siyuan/data/plugins/siyuan-toggl-sync
 ```
-
-PR 被合并以后集市会通过 GitHub Actions 自动更新索引并部署。后续发布新版本插件时只需要按照上述步骤创建新的发布即可，不需要再 PR 社区集市仓库。
-
-正常情况下，社区集市仓库每隔 1 小时会自动更新索引并部署，可在 https://github.com/siyuan-note/bazaar/actions 查看部署状态。
-
-## 开发者须知
-
-开发者需注意以下规范。
-
-### 1. 读写文件规范
-
-插件或者外部扩展如果有直接读取或者写入 data 下文件的需求，请通过调用内核 API 来实现，**不要自行调用 `fs` 或者其他 electron、nodejs API**，否则可能会导致数据同步时分块丢失，造成云端数据损坏。
-
-相关 API 见 `/api/file/*`（例如 `/api/file/getFile` 等）。
-
-### 2. Daily Note 属性规范
-
-思源在创建日记的时候会自动为文档添加 custom-dailynote-yyyymmdd 属性，以方便将日记文档同普通文档区分。
-
-> 详情请见 [Github Issue #9807](https://github.com/siyuan-note/siyuan/issues/9807)。
-
-开发者在开发手动创建 Daily Note 的功能时请注意：
-
-* 如果调用了 `/api/filetree/createDailyNote` 创建日记，那么文档会自动添加这个属性，无需开发者特别处理
-* 如果是开发者代码手动创建文档（例如使用 `createDocWithMd` API 创建日记），请手动为文档添加该属性

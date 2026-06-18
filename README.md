@@ -1,167 +1,107 @@
-[中文](https://github.com/siyuan-note/plugin-sample/blob/main/README_zh_CN.md)
+[中文](./README_zh_CN.md)
 
-# SiYuan plugin sample
+# Toggl Sync
 
-## Get started
+Sync Toggl time entries into a SiYuan database, with controlled write-back from SiYuan to Toggl.
 
-* Make a copy of this repo as a template with the <kbd>Use this template</kbd> button, please note that the repo name must be the same as the plugin name, the default branch must be `main`
-* Clone your repo to a local development folder. For convenience, you can place this folder in your `{workspace}/data/plugins/` folder
-* Install [NodeJS](https://nodejs.org/en/download) and [pnpm](https://pnpm.io/installation), then run `pnpm i` in the command line under your repo folder
-* Execute `pnpm run dev` for real-time compilation
-* Open SiYuan marketplace and enable plugin in downloaded tab
+## Features
+
+* Manually creates or mounts a `Toggl Sync` database in the target document from settings.
+* Pulls created, updated, and deleted Toggl time entries.
+* Uploads new local SiYuan rows to Toggl only after they are marked `本地待上传`.
+* Uses a single `同步状态` field to control Toggl updates, Toggl deletion, and local cleanup.
+* Shows a local status bar timer without continuously polling the Toggl API.
+* Supports automatic sync intervals: off, 15 minutes, 30 minutes, and 60 minutes. The default is 30 minutes.
+
+## Configuration
+
+Open the plugin settings and fill in:
+
+* `API Token`: your personal Toggl API token.
+* `Target Document`: the SiYuan document ID that should contain the database.
+* `Initial/Repair Sync Range`: used only for first import or manual repair. The default is the last 30 days, and the maximum is 90 days.
+* `Auto Sync Interval`: the regular automatic sync interval. 30 minutes is recommended for free Toggl accounts.
+* `Display Text`: the idle text shown in the status bar. The default is `Toggl`.
+
+The top bar menu only keeps frequent actions: `Sync Now`, start/stop a timer, and manual entry creation. `Initial/Repair Sync` and `Clean Local Deletable Rows` live in the settings maintenance area. Project and tag refresh actions are available next to the corresponding inputs in the timer and manual-entry dialogs.
+
+If the target document has no database, sync only shows a prompt and does not create one automatically. Use `Create Database` in settings to create an empty database first.
+
+## Sync Model
+
+Regular sync uses Toggl's incremental time entries endpoint:
+
+```text
+/me/time_entries?since=last_successful_sync_time
+```
+
+`since` is based on the entry modification time, not the entry start date. If an old Toggl entry is updated or deleted after the last sync, it will still be returned.
+
+First sync and manual repair use a `start_date/end_date` range to import or reconcile historical entries. Toggl currently rejects `start_date` values earlier than about 3 months ago, so the plugin offers 7/30/90 day ranges. This range does not limit later regular incremental sync.
+
+## Database Fields
+
+The plugin automatically ensures these fields exist:
+
+| Field    | Type          | Description             |
+| -------- | ------------- | ----------------------- |
+| 描述     | text/primary  | Toggl entry description |
+| TogglID  | number        | Toggl time entry ID     |
+| 项目     | text          | Toggl project name      |
+| 标签     | multi-select  | Toggl tags              |
+| 开始     | date          | Start time              |
+| 结束     | date          | Stop time               |
+| 日期     | date          | Start date              |
+| 时长     | number        | Duration in seconds     |
+| 时长显示 | text          | `h:mm:ss`               |
+| 计费     | checkbox      | Billable flag           |
+| 同步状态 | single-select | Sync state and action   |
+
+## Sync Status
+
+| Status       | Meaning                                                                            |
+| ------------ | ---------------------------------------------------------------------------------- |
+| 正常         | Local row is aligned with Toggl                                                    |
+| 未同步       | New local row has not been uploaded yet                                            |
+| 本地待上传   | Upload a new local row to Toggl on next sync                                       |
+| Toggl 待更新 | Update the Toggl entry from the local row on next sync                             |
+| Toggl 待删除 | Delete the Toggl entry on next sync                                                |
+| 本地可删除   | Toggl has been deleted, or remote deletion has completed; local row can be cleaned |
+| 失败         | Upload, update, or deletion failed                                                 |
+
+New local rows without a `TogglID` are marked `未同步` by default. They are uploaded to Toggl only after you change `同步状态` to `本地待上传`; after a successful upload, the plugin writes the returned `TogglID` and sets the row to `正常`.
+
+When a Toggl entry is deleted remotely, the plugin does not immediately hard-delete the SiYuan row. It marks the row as `本地可删除`. Use `Clean Local Deletable Rows` in the settings page when you are ready to remove those rows.
+
+## Projects And Tags
+
+Project names are cached in the plugin configuration to avoid requesting the project list on every sync. The plugin calls the Toggl projects API when the cache is empty, when timer/manual-entry dialogs need project options, or when you click `Refresh` next to the project picker.
+
+Tags are cached for suggestions in the timer and manual-entry dialogs. The plugin calls `/me/tags` when the tag cache is empty or when you click `Refresh` next to the tag input. Pulled entries still use the `tags` returned by Toggl time entries, and local upload/update uses the SiYuan row's `标签` field.
+
+## API Strategy
+
+Toggl's free API quota is limited, so the plugin keeps calls low:
+
+* Regular sync: one incremental pull plus only the required local upload/update/delete requests.
+* Auto sync: defaults to every 30 minutes and stays quiet when nothing changed.
+* First/repair sync: manual only, using a chosen time range.
+* Status bar timer: runs locally and only calls the API on startup, start, stop, or manual refresh.
+
+Toggl API documentation:
+
+* [Time entries API](https://engineering.toggl.com/docs/track/api/time_entries/)
+* [API rate limits](https://engineering.toggl.com/docs/track/)
 
 ## Development
 
-* i18n/*
-* icon.png (160*160)
-* index.css
-* index.js
-* plugin.json
-* preview.png (1024*768)
-* README*.md
-* [Fontend API](https://github.com/siyuan-note/petal)
-* [Backend API](https://github.com/siyuan-note/siyuan/blob/master/API.md)
-
-## I18n
-
-In terms of internationalization, our main consideration is to support multiple languages. Specifically, we need to
-complete the following tasks:
-
-* Meta information about the plugin itself, such as plugin description and readme
-  * `displayName`, `description` and `readme` fields in plugin.json, and the corresponding README*.md file
-* Text used in the plugin, such as button text and tooltips
-  * src/i18n/*.json language configuration files
-  * Use `this.i18.key` to get the text in the code
-
-It is recommended that the plugin supports at least English and Simplified Chinese, so that more people can use it more conveniently. Unsupported languages do not need to be declared in the `displayName`, `description` and `readme` fields in plugin.json.
-
-## plugin.json
-
-A typical example is as follows:
-
-```json
-{
-  "name": "plugin-sample",
-  "author": "Vanessa",
-  "url": "https://github.com/siyuan-note/plugin-sample",
-  "version": "0.4.2",
-  "minAppVersion": "3.3.0",
-  "backends": ["all"],
-  "frontends": ["all"],
-  "disabledInPublish": false,
-  "displayName": {
-    "default": "Plugin Sample",
-    "zh_CN": "插件示例"
-  },
-  "description": {
-    "default": "This is a plugin development sample",
-    "zh_CN": "这是一个插件开发示例"
-  },
-  "readme": {
-    "default": "README.md",
-    "zh_CN": "README_zh_CN.md"
-  },
-  "funding": {
-    "custom": ["https://ld246.com/sponsor"]
-  },
-  "keywords": [
-    "开发者参考",
-    "developer reference",
-    "示例插件"
-  ]
-}
+```bash
+npm install
+npm run build
 ```
 
-* `name`: Plugin package name, must be the same as the GitHub repository name, and cannot be duplicated with other plugins in the marketplace
-* `author`: Plugin author name
-* `url`: Plugin repo URL
-* `version`: Plugin version number, needs to follow the [semver](https://semver.org/) specification
-* `minAppVersion`: Minimum SiYuan version required to use this plugin
-* `disabledInPublish`: Whether to disable the plugin when using the publish service, defaults to false, i.e., not disabled
-* `backends`: Backend environment required by the plugin, optional values are `windows`, `linux`, `darwin`, `docker`, `android`, `ios`, `harmony` and `all`
-  * `windows`: Windows desktop
-  * `linux`: Linux desktop
-  * `darwin`: macOS desktop
-  * `docker`: Docker
-  * `android`: Android APP
-  * `ios`: iOS APP
-  * `harmony`: HarmonyOS APP
-  * `all`: All environments
-* `frontends`: Frontend environment required by the plugin, optional values are `desktop`, `desktop-window`, `mobile`, `browser-desktop`, `browser-mobile` and `all`
-  * `desktop`: Desktop
-  * `desktop-window`: Desktop window converted from tab
-  * `mobile`: Mobile APP
-  * `browser-desktop`: Desktop browser
-  * `browser-mobile`: Mobile browser
-  * `all`: All environments
-* `displayName`: Plugin name (plain text), displayed in the marketplace list
-  * `default`: Default language, must exist. If the plugin supports English, English should be used here
-  * `zh_CN`, `en_US` and other languages: optional
-* `description`: Plugin description (plain text), displayed in the marketplace list
-  * `default`: Default language, must exist. If the plugin supports English, English should be used here
-  * `zh_CN`, `en_US` and other languages: optional
-* `readme`: Readme file name, displayed in the marketplace details page
-  * `default`: Default language, must exist. If the plugin supports English, English should be used here
-  * `zh_CN`, `en_US` and other languages: optional
-* `funding`: Plugin sponsorship information, only one type will be displayed in the marketplace
-  * `openCollective`: Open Collective name
-  * `patreon`: Patreon name
-  * `github`: GitHub login name
-  * `custom`: Custom sponsorship link list
-* `keywords`: Search keyword list, used for marketplace search function, supplements search keywords beyond the values of `name`, `author`, `displayName`, and `description` fields
+Deploy to a local SiYuan plugin folder:
 
-## Package
-
-No matter which method is used to compile and package, we finally need to generate a package.zip, which contains at
-least the following files:
-
-* i18n/* (If the plugin supports multiple languages, language files need to be packaged to this directory, otherwise this directory is not needed)
-* icon.png (recommended size: 160*160, file size should not exceed 20KB)
-* index.css
-* index.js
-* plugin.json
-* preview.png (recommended size: 1024*768, file size should not exceed 200KB)
-* README*.md
-
-## List on the marketplace
-
-* Execute `pnpm run build` to generate package.zip
-* Create a new GitHub release using your new version number as the "Tag version". See here for an
-  example: https://github.com/siyuan-note/plugin-sample/releases
-* Upload the file package.zip as binary attachments
-* Publish the release
-
-If this is the first release, you also need to create a PR to the [Community Bazaar](https://github.com/siyuan-note/bazaar) repository and modify the plugins.json file in it. This file is the index of all community plugin repositories, the format is:
-
-```json
-{
-  "repos": [
-    "username/reponame"
-  ]
-}
+```bash
+ditto dist /path/to/siyuan/data/plugins/siyuan-toggl-sync
 ```
-
-After the PR is merged, the bazaar will automatically update the index and deploy through GitHub Actions. For subsequent plugin releases, you only need to follow the above steps to create a new release, and you don't need to PR the community bazaar repository.
-
-Under normal circumstances, the community bazaar repository will automatically update the index and deploy every hour, and you can check the deployment status at https://github.com/siyuan-note/bazaar/actions.
-
-## Developer's Guide
-
-Developers need to pay attention to the following specifications.
-
-### 1. File Reading and Writing Specifications
-
-If plugins or external extensions require direct reading or writing of files under the `data` directory, please use the kernel API to achieve this. **Do not call `fs` or other electron or nodejs APIs directly**, as it may result in data loss during synchronization and cause damage to cloud data.
-
-Related APIs can be found at: `/api/file/*` (e.g., `/api/file/getFile`).
-
-### 2. Daily Note Attribute Specifications
-
-When creating a daily note in SiYuan, a custom-dailynote-yyyymmdd attribute will be automatically added to the document to distinguish it from regular documents.
-
-> For more details, please refer to [Github Issue #9807](https://github.com/siyuan-note/siyuan/issues/9807).
-
-Developers should pay attention to the following when developing the functionality to manually create Daily Notes:
-
-* If `/api/filetree/createDailyNote` is called to create a daily note, the attribute will be automatically added to the document, and developers do not need to handle it separately
-* If a document is created manually by developer's code (e.g., using the `createDocWithMd` API to create a daily note), please manually add this attribute to the document

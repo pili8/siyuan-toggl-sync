@@ -1,984 +1,2482 @@
 import {
     Plugin,
     showMessage,
-    confirm,
     Dialog,
     Menu,
-    openTab,
-    adaptHotkey,
-    getFrontend,
-    getBackend,
-    Setting,
-    fetchPost,
-    Protyle,
-    openWindow,
-    IOperation,
-    Constants,
-    openMobileFileById,
-    lockScreen,
-    ICard,
-    ICardData,
-    Custom,
-    exitSiYuan,
-    getModelByDockType,
-    getAllEditor,
-    Files,
-    platformUtils,
-    openSetting,
-    openAttributePanel,
-    saveLayout,
-    IMenuItem,
-    IKernelPluginState,
-    IKernelPluginRpcCall,
+    fetchSyncPost,
 } from "siyuan";
+import * as togglApi from "./toggl/api";
+import type {
+    CreateTimeEntryInput,
+    Tag,
+    TimeEntry,
+    UpdateTimeEntryInput,
+} from "./toggl/types";
 import "./index.scss";
 
-const STORAGE_NAME = "menu-config";
-const TAB_TYPE = "custom_tab";
-const DOCK_TYPE = "dock_tab";
+interface PluginConfig {
+    token: string;
+    workspaceId: number;
+    targetDocId: string;
+    initialDays: number;
+    lastSyncTime: string;
+    autoSyncMinutes: number;
+    statusBarTimer: boolean;
+    statusBarText: string;
+    statusText?: string;
+    projectCache: ProjectCacheItem[];
+    tagCache: TagCacheItem[];
+    currentTimer: CurrentTimerState | null;
+    pendingOps: PendingOp[];
+    avId?: string;
+    statusOptionsPreparedAvId?: string;
+}
 
-export default class PluginSample extends Plugin {
-    private custom: () => Custom;
-    private isMobile: boolean;
-    private blockIconEventBindThis = this.blockIconEvent.bind(this);
+const DEFAULT_CONFIG: PluginConfig = {
+    token: "",
+    workspaceId: 0,
+    targetDocId: "",
+    initialDays: 30,
+    lastSyncTime: "",
+    autoSyncMinutes: 30,
+    statusBarTimer: true,
+    statusBarText: "Toggl",
+    projectCache: [],
+    tagCache: [],
+    currentTimer: null,
+    pendingOps: [],
+};
 
-    updateProtyleToolbar(toolbar: Array<string | IMenuItem>) {
-        toolbar.push("|");
-        toolbar.push({
-            name: "insert-smail-emoji",
-            icon: "iconEmoji",
-            hotkey: "⇧⌘I",
-            tipPosition: "n",
-            tip: this.i18n.insertEmoji,
-            click(protyle: Protyle) {
-                protyle.insert("😊");
-            },
-        });
-        return toolbar;
+const CONFIG_FILE = "toggl-sync.json";
+
+type AttributeViewKey = {
+    id: string;
+    name: string;
+    type: string;
+    options?: {name: string; color?: string;}[];
+};
+
+type DatabaseFieldDefinition = {
+    name: string;
+    type: string;
+    aliases: string[];
+};
+
+type TargetDatabase = {
+    avId: string;
+    keys: AttributeViewKey[];
+};
+
+type DatabaseCellInput = string | number | boolean | Date | null | undefined;
+
+type TogglDatabaseRow = {
+    id: number;
+    description: string;
+    projectName: string;
+    tagNames: string[];
+    start: Date;
+    stop: Date | null;
+    durationSeconds: number;
+    billable: boolean;
+    syncStatus?: SyncStatus;
+};
+
+type SyncStatus = "正常" | "未同步" | "本地待上传" | "Toggl 待更新" | "Toggl 待删除" | "本地可删除" | "失败";
+
+type SyncMode = "regular" | "repair" | "auto";
+
+type LocalDatabaseRow = {
+    rowId: string;
+    togglId: number | null;
+    syncStatus: SyncStatus | "";
+    description: string;
+    projectName: string;
+    tagNames: string[];
+    start: Date | null;
+    stop: Date | null;
+    durationSeconds: number;
+    billable: boolean;
+};
+
+type LocalUploadResult = {
+    created: number;
+    updated: number;
+    deleted: number;
+    failed: number;
+};
+
+type RemoteApplyResult = {
+    added: number;
+    updated: number;
+    markedDeleted: number;
+    skippedPending: number;
+};
+
+const SYNC_STATUS_OPTIONS: SyncStatus[] = [
+    "正常",
+    "未同步",
+    "本地待上传",
+    "Toggl 待更新",
+    "Toggl 待删除",
+    "本地可删除",
+    "失败",
+];
+
+const TOGGL_DATABASE_FIELDS: DatabaseFieldDefinition[] = [
+    {name: "描述", type: "text", aliases: ["描述", "Description", "标题", "Title", "名称", "Name", "任务", "事项"]},
+    {name: "TogglID", type: "number", aliases: ["TogglID", "Toggl ID", "Toggl Id", "toggl-id"]},
+    {name: "项目", type: "text", aliases: ["项目", "Project"]},
+    {name: "标签", type: "mSelect", aliases: ["标签", "Tags", "Tag"]},
+    {name: "开始", type: "date", aliases: ["开始", "开始时间", "Start", "Start Time"]},
+    {name: "结束", type: "date", aliases: ["结束", "结束时间", "End", "End Time", "Stop", "Stop Time"]},
+    {name: "日期", type: "date", aliases: ["日期", "Date"]},
+    {name: "时长", type: "number", aliases: ["时长", "Duration"]},
+    {name: "时长显示", type: "text", aliases: ["时长显示", "持续时间", "Duration Text", "Duration Display"]},
+    {name: "计费", type: "checkbox", aliases: ["计费", "可计费", "Billable"]},
+    {name: "同步状态", type: "select", aliases: ["同步状态", "Sync Status"]},
+];
+
+type PendingOp =
+    | {type: "start"; description: string; projectId?: number; tags: string[]; billable: boolean; start: string;}
+    | {type: "stop"; entryId: number; workspaceId: number;}
+    | {
+        type: "manual";
+        description: string;
+        start: string;
+        durationSeconds: number;
+        projectId?: number;
+        tags: string[];
+        billable: boolean;
+    };
+
+type ProjectCacheItem = {
+    id: number;
+    name: string;
+    workspace_id: number;
+};
+
+type TagCacheItem = {
+    id: number;
+    name: string;
+    workspace_id: number;
+};
+
+type CurrentTimerState = {
+    id: number;
+    workspaceId: number;
+    description: string;
+    start: string;
+};
+
+export default class TogglSyncPlugin extends Plugin {
+    private config: PluginConfig = {...DEFAULT_CONFIG};
+    private projects: Map<number, string> = new Map();
+    private projectsLoadPromise: Promise<void> | null = null;
+    private tags: string[] = [];
+    private tagsLoadPromise: Promise<void> | null = null;
+    private statusBarEl: HTMLElement | null = null;
+    private timerInterval: ReturnType<typeof setInterval> | null = null;
+    private autoSyncInterval: ReturnType<typeof setInterval> | null = null;
+    private syncInProgress = false;
+    private lastEntryId: number | null = null;
+    private suppressDatabasePrompt = false;
+
+    async onload() {
+        await this.loadConfig();
+        this.addTopBarButton();
     }
 
-    onload() {
-        this.kernel.rpc.bind("unload", this.onKernelPluginUnload);
-        this.kernel.rpc.bind("notify", this.onKernelPluginNotify);
-        this.eventBus.on("kernel-plugin-state-change", this.onKernelPluginStateChange);
-
-        this.data[STORAGE_NAME] = {readonlyText: "Readonly"};
-
-        const frontEnd = getFrontend();
-        this.isMobile = frontEnd === "mobile" || frontEnd === "browser-mobile";
-        // 图标的制作参见帮助文档
-        this.addIcons(`<symbol id="iconFace" viewBox="0 0 32 32">
-<path d="M13.667 17.333c0 0.92-0.747 1.667-1.667 1.667s-1.667-0.747-1.667-1.667 0.747-1.667 1.667-1.667 1.667 0.747 1.667 1.667zM20 15.667c-0.92 0-1.667 0.747-1.667 1.667s0.747 1.667 1.667 1.667 1.667-0.747 1.667-1.667-0.747-1.667-1.667-1.667zM29.333 16c0 7.36-5.973 13.333-13.333 13.333s-13.333-5.973-13.333-13.333 5.973-13.333 13.333-13.333 13.333 5.973 13.333 13.333zM14.213 5.493c1.867 3.093 5.253 5.173 9.12 5.173 0.613 0 1.213-0.067 1.787-0.16-1.867-3.093-5.253-5.173-9.12-5.173-0.613 0-1.213 0.067-1.787 0.16zM5.893 12.627c2.28-1.293 4.040-3.4 4.88-5.92-2.28 1.293-4.040 3.4-4.88 5.92zM26.667 16c0-1.040-0.16-2.040-0.44-2.987-0.933 0.2-1.893 0.32-2.893 0.32-4.173 0-7.893-1.92-10.347-4.92-1.4 3.413-4.187 6.093-7.653 7.4 0.013 0.053 0 0.12 0 0.187 0 5.88 4.787 10.667 10.667 10.667s10.667-4.787 10.667-10.667z"></path>
-</symbol>
-<symbol id="iconSaving" viewBox="0 0 32 32">
-<path d="M20 13.333c0-0.733 0.6-1.333 1.333-1.333s1.333 0.6 1.333 1.333c0 0.733-0.6 1.333-1.333 1.333s-1.333-0.6-1.333-1.333zM10.667 12h6.667v-2.667h-6.667v2.667zM29.333 10v9.293l-3.76 1.253-2.24 7.453h-7.333v-2.667h-2.667v2.667h-7.333c0 0-3.333-11.28-3.333-15.333s3.28-7.333 7.333-7.333h6.667c1.213-1.613 3.147-2.667 5.333-2.667 1.107 0 2 0.893 2 2 0 0.28-0.053 0.533-0.16 0.773-0.187 0.453-0.347 0.973-0.427 1.533l3.027 3.027h2.893zM26.667 12.667h-1.333l-4.667-4.667c0-0.867 0.12-1.72 0.347-2.547-1.293 0.333-2.347 1.293-2.787 2.547h-8.227c-2.573 0-4.667 2.093-4.667 4.667 0 2.507 1.627 8.867 2.68 12.667h2.653v-2.667h8v2.667h2.68l2.067-6.867 3.253-1.093v-4.707z"></path>
-</symbol>`);
-
-        this.custom = this.addTab({
-            type: TAB_TYPE,
-            init() {
-                this.element.innerHTML = `<div class="plugin-sample__custom-tab">${this.data.text}</div>`;
-            },
-            beforeDestroy() {
-                console.log("before destroy tab:", TAB_TYPE);
-            },
-            destroy() {
-                console.log("destroy tab:", TAB_TYPE);
-            },
-        });
-
-        this.addCommand({
-            langKey: "showDialog",
-            hotkey: "⇧⌘O",
-            callback: () => {
-                this.showDialog();
-            },
-        });
-
-        this.addCommand({
-            langKey: "getTab",
-            hotkey: "⇧⌘M",
-            globalCallback: () => {
-                console.log(this.getOpenedTab());
-            },
-        });
-        this.addDock({
-            config: {
-                position: "LeftBottom",
-                size: {width: 200, height: 0},
-                icon: "iconSaving",
-                title: "Custom Dock",
-                hotkey: "⌥⌘W",
-            },
-            data: {
-                text: "This is my custom dock",
-            },
-            type: DOCK_TYPE,
-            resize() {
-                console.log(DOCK_TYPE + " resize");
-            },
-            update() {
-                console.log(DOCK_TYPE + " update");
-            },
-            init: (dock) => {
-                if (this.isMobile) {
-                    dock.element.innerHTML = `<div class="toolbar toolbar--border toolbar--dark">
-    <svg class="toolbar__icon"><use xlink:href="#iconEmoji"></use></svg>
-        <div class="toolbar__text">Custom Dock</div>
-    </div>
-    <div class="fn__flex-1 plugin-sample__custom-dock">
-        ${dock.data.text}
-    </div>
-</div>`;
-                } else {
-                    dock.element.innerHTML = `<div class="fn__flex-1 fn__flex-column">
-    <div class="block__icons">
-        <div class="block__logo">
-            <svg class="block__logoicon"><use xlink:href="#iconEmoji"></use></svg>Custom Dock
-        </div>
-        <span class="fn__flex-1 fn__space"></span>
-        <span data-type="min" class="block__icon ariaLabel" data-position="north" aria-label="Min ${
-                        adaptHotkey("⌘W")
-                    }"><svg><use xlink:href="#iconMin"></use></svg></span>
-    </div>
-    <div class="fn__flex-1 plugin-sample__custom-dock">
-        ${dock.data.text}
-    </div>
-</div>`;
+    async onLayoutReady() {
+        if (this.config.statusBarTimer && this.config.token) {
+            await this.startStatusBarTimer(true);
+        }
+        if (this.config.token && this.config.targetDocId) {
+            if (this.config.pendingOps.length > 0) {
+                const flushed = await this.flushPendingOps();
+                if (flushed > 0) {
+                    showMessage(`启动时已重试 ${flushed} 条暂存操作`, 2000, "info");
                 }
-            },
-            destroy() {
-                console.log("destroy dock:", DOCK_TYPE);
-            },
-        });
-
-        const textareaElement = document.createElement("textarea");
-        this.setting = new Setting({
-            confirmCallback: () => {
-                this.saveData(STORAGE_NAME, {readonlyText: textareaElement.value}).catch(e => {
-                    showMessage(`[${this.name}] save data [${STORAGE_NAME}] fail: `, e);
-                });
-            },
-        });
-        this.setting.addItem({
-            title: "Readonly text",
-            direction: "row",
-            description: "Open plugin url in browser",
-            createActionElement: () => {
-                textareaElement.className = "b3-text-field fn__block";
-                textareaElement.placeholder = "Readonly text in the menu";
-                textareaElement.value = this.data[STORAGE_NAME].readonlyText;
-                return textareaElement;
-            },
-        });
-        const btnaElement = document.createElement("button");
-        btnaElement.className = "b3-button b3-button--outline fn__flex-center fn__size200";
-        btnaElement.textContent = "Open";
-        btnaElement.addEventListener("click", () => {
-            window.open("https://github.com/siyuan-note/plugin-sample");
-        });
-        this.setting.addItem({
-            title: "Open plugin url",
-            description: "Open plugin url in browser",
-            actionElement: btnaElement,
-        });
-
-        this.protyleSlash = [{
-            filter: ["insert emoji 😊", "插入表情 😊", "crbqwx"],
-            html:
-                `<div class="b3-list-item__first"><span class="b3-list-item__text">${this.i18n.insertEmoji}</span><span class="b3-list-item__meta">😊</span></div>`,
-            id: "insertEmoji",
-            callback(protyle: Protyle) {
-                protyle.insert("😊");
-            },
-        }];
-
-        this.protyleOptions = {
-            toolbar: [
-                "block-ref",
-                "a",
-                "|",
-                "text",
-                "strong",
-                "em",
-                "u",
-                "s",
-                "mark",
-                "sup",
-                "sub",
-                "clear",
-                "|",
-                "code",
-                "kbd",
-                "tag",
-                "inline-math",
-                "inline-memo",
-            ],
-        };
-
-        console.log(this.i18n.helloPlugin);
-    }
-
-    onLayoutReady() {
-        const topBarElement = this.addTopBar({
-            icon: "iconFace",
-            title: this.i18n.addTopBarIcon,
-            position: "right",
-            callback: () => {
-                if (this.isMobile) {
-                    this.addMenu();
-                } else {
-                    let rect = topBarElement.getBoundingClientRect();
-                    // 如果被隐藏，则使用更多按钮
-                    if (rect.width === 0) {
-                        rect = document.querySelector("#barMore").getBoundingClientRect();
-                    }
-                    if (rect.width === 0) {
-                        rect = document.querySelector("#barPlugins").getBoundingClientRect();
-                    }
-                    this.addMenu(rect);
-                }
-            },
-        });
-        const statusIconTemp = document.createElement("template");
-        statusIconTemp.innerHTML = `<div class="toolbar__item ariaLabel" aria-label="Remove plugin-sample Data">
-    <svg>
-        <use xlink:href="#iconTrashcan"></use>
-    </svg>
-</div>`;
-        statusIconTemp.content.firstElementChild.addEventListener("click", () => {
-            confirm("⚠️", this.i18n.confirmRemove.replace("${name}", this.name), () => {
-                this.removeData(STORAGE_NAME).then(() => {
-                    this.data[STORAGE_NAME] = {readonlyText: "Readonly"};
-                    showMessage(`[${this.name}]: ${this.i18n.removedData}`);
-                }).catch(e => {
-                    showMessage(`[${this.name}] remove data [${STORAGE_NAME}] fail: `, e);
-                });
-            });
-        });
-        this.addStatusBar({
-            element: statusIconTemp.content.firstElementChild as HTMLElement,
-        });
-        this.loadData(STORAGE_NAME).catch(e => {
-            console.log(`[${this.name}] load data [${STORAGE_NAME}] fail: `, e);
-        });
-        console.log(`frontend: ${getFrontend()}; backend: ${getBackend()}`);
+            }
+            await this.syncEntries("auto");
+        }
+        this.setupAutoSync();
     }
 
     onunload() {
-        console.log(this.i18n.byePlugin);
-
-        this.kernel.rpc.unbind("unload", this.onKernelPluginUnload);
-        this.kernel.rpc.unbind("notify", this.onKernelPluginNotify);
-        this.eventBus.off("kernel-plugin-state-change", this.onKernelPluginStateChange);
+        this.stopStatusBarTimer();
+        this.stopAutoSync();
     }
 
-    uninstall() {
-        // 卸载插件时删除插件数据
-        // Delete plugin data when uninstalling the plugin
-        this.removeData(STORAGE_NAME).catch(e => {
-            showMessage(`uninstall [${this.name}] remove data [${STORAGE_NAME}] fail: ${e.msg}`);
+    private async loadConfig() {
+        const data = await this.loadData(CONFIG_FILE);
+        if (data) {
+            this.config = {...DEFAULT_CONFIG, ...data};
+        }
+        this.config.initialDays = this.normalizeInitialDays(this.config.initialDays);
+        this.config.statusBarText = this.normalizeStatusBarText(this.config.statusBarText || this.config.statusText);
+        if (this.config.token) {
+            togglApi.setToken(this.config.token);
+        }
+        this.loadProjectCache();
+        this.loadTagCache();
+        this.loadCurrentTimerState();
+    }
+
+    private async saveConfig() {
+        await this.saveData(CONFIG_FILE, this.config);
+    }
+
+    private async queuePendingOp(op: PendingOp) {
+        this.config.pendingOps.push(op);
+        await this.saveConfig();
+        showMessage(`API 暂不可用，已暂存本地（${this.config.pendingOps.length} 条待处理）`, 3000, "info");
+    }
+
+    private async runButtonAction(
+        button: HTMLButtonElement,
+        busyText: string,
+        action: () => Promise<void>,
+    ): Promise<void> {
+        const previousText = button.textContent || "";
+        button.disabled = true;
+        button.textContent = busyText;
+        try {
+            await action();
+        } catch (error) {
+            console.error("[TogglSync] button action failed:", error);
+            showMessage(`操作失败: ${this.formatUnknownError(error)}`, 6000, "error");
+        } finally {
+            button.disabled = false;
+            button.textContent = previousText;
+        }
+    }
+
+    private addTopBarButton() {
+        this.addTopBar({
+            icon: "iconClock",
+            title: "Toggl Sync",
+            position: "right",
+            callback: () => {
+                this.showSyncMenu();
+            },
         });
     }
 
-    // 使用 saveData() 存储的数据发生变更时触发，注释掉则自动禁用插件再重新启用
-    // Triggered when data stored using saveData() changes. If commented out, the plugin will be automatically disabled and then re-enabled.
-    // onDataChanged() {
-    //     console.log("onDataChanged");
-    // }
-
-    async updateCards(options: ICardData) {
-        options.cards.sort((a: ICard, b: ICard) => {
-            if (a.blockID < b.blockID) {
-                return -1;
-            }
-            if (a.blockID > b.blockID) {
-                return 1;
-            }
-            return 0;
+    private showSyncMenu(position?: {x: number; y: number;}) {
+        const menu = new Menu("togglSyncMenu");
+        menu.addItem({
+            icon: "iconRefresh",
+            label: this.i18n.syncNow,
+            click: async () => {
+                await this.syncEntries();
+            },
         });
-        return options;
+        menu.addItem({
+            icon: "iconPlay",
+            label: this.i18n.startTimer,
+            click: async () => {
+                await this.openStartTimerDialog();
+            },
+        });
+        menu.addItem({
+            icon: "iconPause",
+            label: this.i18n.stopTimer,
+            click: async () => {
+                await this.stopCurrentTimer();
+            },
+        });
+        menu.addItem({
+            icon: "iconAdd",
+            label: this.i18n.manualEntry,
+            click: async () => {
+                await this.openManualEntryDialog();
+            },
+        });
+        menu.open(position ?? {x: window.innerWidth - 200, y: 32});
     }
 
-    /* 自定义设置
     openSetting() {
+        const lastSync = this.config.lastSyncTime ?
+            new Date(this.config.lastSyncTime).toLocaleString() :
+            this.i18n.never;
+
         const dialog = new Dialog({
-            title: this.name,
-            content: `<div class="b3-dialog__content"><textarea class="b3-text-field fn__block" placeholder="readonly text in the menu"></textarea></div>
-<div class="b3-dialog__action">
-    <button class="b3-button b3-button--cancel">${this.i18n.cancel}</button><div class="fn__space"></div>
-    <button class="b3-button b3-button--text">${this.i18n.save}</button>
-</div>`,
-            width: this.isMobile ? "92vw" : "520px",
-        });
-        const inputElement = dialog.element.querySelector("textarea");
-        inputElement.value = this.data[STORAGE_NAME].readonlyText;
-        const btnsElement = dialog.element.querySelectorAll(".b3-button");
-        dialog.bindInput(inputElement, () => {
-            (btnsElement[1] as HTMLButtonElement).click();
-        });
-        inputElement.focus();
-        btnsElement[0].addEventListener("click", () => {
-            dialog.destroy();
-        });
-        btnsElement[1].addEventListener("click", () => {
-            this.saveData(STORAGE_NAME, {readonlyText: inputElement.value});
-            dialog.destroy();
-        });
-    }
-    */
+            title: "Toggl Sync - " + this.i18n.settings,
+            content: `<div class="toggl-sync__settings">
+                <div class="toggl-sync__settings-section">
+                    <div class="toggl-sync__settings-section-title">连接</div>
+                    <div class="toggl-sync__settings-field">
+                        <label class="toggl-sync__settings-label">${this.i18n.token}</label>
+                        <div class="toggl-sync__settings-row">
+                            <input id="ts-token" class="b3-text-field toggl-sync__settings-input" type="password" placeholder="Toggl API Token" value="${
+                this.escapeHtml(this.config.token)
+            }">
+                            <button id="ts-verify" class="b3-button b3-button--outline toggl-sync__settings-action" type="button">${this.i18n.tokenVerify}</button>
+                        </div>
+                        <div class="toggl-sync__settings-desc">${this.i18n.tokenDesc}</div>
+                    </div>
+                </div>
 
-    private readonly eventBusPaste = (event: any) => {
-        // 如果需异步处理请调用 preventDefault， 否则会进行默认处理
-        event.preventDefault();
-        // 如果使用了 preventDefault，必须调用 resolve，否则程序会卡死
-        event.detail.resolve({
-            textPlain: event.detail.textPlain.trim(),
+                <div class="toggl-sync__settings-section">
+                    <div class="toggl-sync__settings-section-title">同步</div>
+                    <div class="toggl-sync__settings-grid">
+                        <div class="toggl-sync__settings-field toggl-sync__settings-field--wide">
+                            <label class="toggl-sync__settings-label">${this.i18n.targetDoc}</label>
+                            <input id="ts-doc" class="b3-text-field toggl-sync__settings-control" placeholder="Document ID" value="${
+                this.escapeHtml(this.config.targetDocId)
+            }">
+                            <div class="toggl-sync__settings-desc">${this.i18n.targetDocDesc}</div>
+                        </div>
+                        <div class="toggl-sync__settings-field">
+                            <label class="toggl-sync__settings-label">首次/修复范围</label>
+                            <select id="ts-days" class="b3-select toggl-sync__settings-control">
+                                <option value="7" ${
+                this.config.initialDays === 7 ? "selected" : ""
+            }>${this.i18n.days7}</option>
+                                <option value="30" ${
+                this.config.initialDays === 30 ? "selected" : ""
+            }>${this.i18n.days30}</option>
+                                <option value="90" ${
+                this.config.initialDays === 90 ? "selected" : ""
+            }>${this.i18n.days90}</option>
+                            </select>
+                            <div class="toggl-sync__settings-desc">最多 90 天。</div>
+                        </div>
+                        <div class="toggl-sync__settings-field">
+                            <label class="toggl-sync__settings-label">自动同步周期</label>
+                            <select id="ts-auto-sync" class="b3-select toggl-sync__settings-control">
+                                <option value="0" ${this.config.autoSyncMinutes === 0 ? "selected" : ""}>关闭</option>
+                                <option value="15" ${
+                this.config.autoSyncMinutes === 15 ? "selected" : ""
+            }>15 分钟</option>
+                                <option value="30" ${
+                this.config.autoSyncMinutes === 30 ? "selected" : ""
+            }>30 分钟</option>
+                                <option value="60" ${
+                this.config.autoSyncMinutes === 60 ? "selected" : ""
+            }>60 分钟</option>
+                            </select>
+                            <div class="toggl-sync__settings-desc">免费版建议 30 分钟。</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="toggl-sync__settings-section">
+                    <div class="toggl-sync__settings-section-title">状态栏计时</div>
+                    <div class="toggl-sync__settings-grid">
+                        <div class="toggl-sync__settings-field toggl-sync__settings-field--wide">
+                            <label class="toggl-sync__settings-switch">
+                                <input id="ts-statusbar" type="checkbox" class="b3-switch" ${
+                this.config.statusBarTimer ? "checked" : ""
+            }>
+                                <span>${this.i18n.statusBarDesc}</span>
+                            </label>
+                        </div>
+                        <div class="toggl-sync__settings-field toggl-sync__settings-field--wide">
+                            <label class="toggl-sync__settings-label">${this.i18n.statusText}</label>
+                            <input id="ts-statusbar-text" class="b3-text-field toggl-sync__settings-control" placeholder="Toggl" value="${
+                this.escapeHtml(this.config.statusBarText)
+            }">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="toggl-sync__settings-section">
+                    <div class="toggl-sync__settings-section-title">数据维护</div>
+                    <div class="toggl-sync__settings-field">
+                        <div class="toggl-sync__settings-meta">
+                            <div>
+                                <div class="toggl-sync__settings-label">${this.i18n.lastSync}</div>
+                                <div id="ts-lastSync" class="toggl-sync__settings-value">${lastSync}</div>
+                            </div>
+                            <button id="ts-clearSync" class="b3-button b3-button--outline toggl-sync__settings-small-action" type="button">清空</button>
+                        </div>
+                    </div>
+                    <div class="toggl-sync__settings-field">
+                        <div class="toggl-sync__settings-button-row">
+                            <button id="ts-create-db" class="b3-button b3-button--outline" type="button">新建数据库</button>
+                            <button id="ts-repair-sync" class="b3-button b3-button--outline" type="button">首次/修复同步</button>
+                            <button id="ts-clean-local" class="b3-button b3-button--outline" type="button">清理本地可删除项</button>
+                        </div>
+                        <div class="toggl-sync__settings-desc">目标文档为空时，请先手动新建数据库；同步不会自动创建。</div>
+                    </div>
+                </div>
+            </div>
+            <div class="b3-dialog__action toggl-sync__settings-footer">
+                <button class="b3-button b3-button--cancel" id="ts-cancel">${this.i18n.cancel || "取消"}</button>
+                <div class="fn__space"></div>
+                <button class="b3-button b3-button--text" id="ts-save">${this.i18n.save || "保存"}</button>
+            </div>`,
+            width: "560px",
         });
-    };
 
-    private readonly eventBusLog = ({detail}: any) => {
-        console.log(detail);
-    };
+        const el = dialog.element;
 
-    private readonly onKernelPluginStateChange = async ({detail}: CustomEvent<IKernelPluginState>) => {
-        console.log("kernel-plugin-state-change", detail);
-        switch (detail.code) {
-            case 2: { // running
-                const params = ["param 1", "param 2"];
-                await this.kernel.rpc.notify["echo-notify"](...params);
-
-                const result = await this.kernel.rpc.call.echo(...params);
-                console.group("JSON RPC client -> kernel: call [echo] method");
-                console.log("params:", params);
-                console.log("result:", result);
-                console.groupEnd();
-
-                const request: IKernelPluginRpcCall[] = [
-                    { // call with custom id
-                        id: 0,
-                        method: "echo",
-                        params: {key1: "value1"},
-                    },
-                    { // call with auto-generated id
-                        method: "echo",
-                        params: ["key2", "value2"],
-                    },
-                    { // notify will not have response and id
-                        method: "echo-notify",
-                        params: {key3: "value3"},
-                        notification: true,
-                    },
-                    { // notify will remove id even if it is set
-                        id: "3",
-                        method: "echo-notify",
-                        params: ["key4", "value4"],
-                        notification: true,
-                    },
-                ];
-                const response = await this.kernel.rpc.batch(...request);
-                console.group("JSON RPC client -> kernel: batch call [echo] and [notify] method");
-                console.log("request:", request);
-                console.log("response:", response);
-                console.groupEnd();
-                break;
+        el.querySelector("#ts-verify").addEventListener("click", async () => {
+            const btn = el.querySelector("#ts-verify") as HTMLButtonElement;
+            btn.disabled = true;
+            btn.textContent = "...";
+            const token = (el.querySelector("#ts-token") as HTMLInputElement).value.trim();
+            togglApi.setToken(token);
+            const res = await togglApi.getMe();
+            btn.disabled = false;
+            btn.textContent = this.i18n.tokenVerify;
+            if (res.ok) {
+                this.config.workspaceId = res.data.default_workspace_id;
+                await this.saveConfig();
+                showMessage(`${this.i18n.tokenValid}: ${res.data.fullname}`, 3000, "info");
+            } else {
+                showMessage(this.formatApiError(this.i18n.tokenInvalid, res), 5000, "error");
             }
+        });
+
+        el.querySelector("#ts-clearSync").addEventListener("click", () => {
+            this.config.lastSyncTime = "";
+            const lastSyncEl = el.querySelector("#ts-lastSync") as HTMLElement;
+            lastSyncEl.textContent = this.i18n.never;
+            showMessage("已清空同步时间，下次同步将重新拉取数据", 3000, "info");
+        });
+
+        el.querySelector("#ts-repair-sync").addEventListener("click", async () => {
+            await this.runButtonAction(
+                el.querySelector("#ts-repair-sync") as HTMLButtonElement,
+                "同步中...",
+                async () => {
+                    await this.applySettingsFromDialog(el);
+                    await this.syncEntries("repair");
+                },
+            );
+        });
+
+        el.querySelector("#ts-clean-local").addEventListener("click", async () => {
+            await this.runButtonAction(
+                el.querySelector("#ts-clean-local") as HTMLButtonElement,
+                "清理中...",
+                async () => {
+                    await this.applySettingsFromDialog(el);
+                    await this.cleanupLocalDeletableRows();
+                },
+            );
+        });
+
+        el.querySelector("#ts-create-db").addEventListener("click", async () => {
+            await this.runButtonAction(
+                el.querySelector("#ts-create-db") as HTMLButtonElement,
+                "创建中...",
+                async () => {
+                    await this.applySettingsFromDialog(el);
+                    await this.createTargetDatabaseFromSettings();
+                },
+            );
+        });
+
+        el.querySelector("#ts-cancel").addEventListener("click", () => {
+            dialog.destroy();
+        });
+
+        el.querySelector("#ts-save").addEventListener("click", async () => {
+            await this.applySettingsFromDialog(el);
+            dialog.destroy();
+            showMessage(this.i18n.settings + " saved");
+        });
+    }
+
+    private async applySettingsFromDialog(el: HTMLElement) {
+        const oldToken = this.config.token;
+        this.config.token = (el.querySelector("#ts-token") as HTMLInputElement).value.trim();
+        this.config.targetDocId = (el.querySelector("#ts-doc") as HTMLInputElement).value.trim();
+        this.config.initialDays = this.normalizeInitialDays(
+            Number((el.querySelector("#ts-days") as HTMLSelectElement).value),
+        );
+        this.config.autoSyncMinutes = Number((el.querySelector("#ts-auto-sync") as HTMLSelectElement).value);
+        this.config.statusBarTimer = (el.querySelector("#ts-statusbar") as HTMLInputElement).checked;
+        this.config.statusBarText = this.normalizeStatusBarText(
+            (el.querySelector("#ts-statusbar-text") as HTMLInputElement).value,
+        );
+        delete this.config.statusText;
+        if (oldToken !== this.config.token) {
+            this.config.workspaceId = 0;
+            this.config.projectCache = [];
+            this.config.tagCache = [];
+            this.config.currentTimer = null;
+            this.projects.clear();
+            this.tags = [];
+            await this.clearCurrentTimer();
         }
-    };
-
-    private onKernelPluginUnload = async (...params: any[]) => {
-        console.group("JSON RPC kernel -> client: unload");
-        console.log("params:", params);
-        console.groupEnd();
-    };
-
-    private onKernelPluginNotify = async (...params: any[]) => {
-        console.group("JSON RPC kernel -> client: notify");
-        console.log("params:", params);
-        console.groupEnd();
-    };
-
-    private blockIconEvent({detail}: any) {
-        detail.menu.addItem({
-            id: "pluginSample_removeSpace",
-            iconHTML: "",
-            label: this.i18n.removeSpace,
-            click: () => {
-                const doOperations: IOperation[] = [];
-                detail.blockElements.forEach((item: HTMLElement) => {
-                    const editElement = item.querySelector('[contenteditable="true"]');
-                    if (editElement) {
-                        editElement.textContent = editElement.textContent.replace(/ /g, "");
-                        doOperations.push({
-                            id: item.dataset.nodeId,
-                            data: item.outerHTML,
-                            action: "update",
-                        });
-                    }
-                });
-                detail.protyle.getInstance().transaction(doOperations);
-            },
-        });
-    }
-
-    private showDialog() {
-        const dialog = new Dialog({
-            title: `SiYuan ${Constants.SIYUAN_VERSION}`,
-            content: `<div class="b3-dialog__content">
-    <div>appId:</div>
-    <div class="fn__hr"></div>
-    <div class="plugin-sample__time">${this.app.appId}</div>
-    <div class="fn__hr"></div>
-    <div class="fn__hr"></div>
-    <div>API demo:</div>
-    <div class="fn__hr"></div>
-    <div class="plugin-sample__time">System current time: <span id="time"></span></div>
-    <div class="fn__hr"></div>
-    <div class="fn__hr"></div>
-    <div>Protyle demo:</div>
-    <div class="fn__hr"></div>
-    <div id="protyle" style="height: 360px;"></div>
-</div>`,
-            width: this.isMobile ? "92vw" : "560px",
-            height: "540px",
-        });
-        new Protyle(this.app, dialog.element.querySelector("#protyle"), {
-            blockId: this.getEditor().protyle.block.rootID,
-        });
-        fetchPost("/api/system/currentTime", {}, (response) => {
-            dialog.element.querySelector("#time").innerHTML = new Date(response.data).toString();
-        });
-    }
-
-    private addMenu(rect?: DOMRect) {
-        const menu = new Menu("topBarSample", () => {
-            console.log(this.i18n.byeMenu);
-        });
-        menu.addItem({
-            icon: "iconSettings",
-            label: "Open Setting",
-            click: () => {
-                openSetting(this.app);
-            },
-        });
-        menu.addItem({
-            icon: "iconDrag",
-            label: "Open Attribute Panel",
-            click: () => {
-                openAttributePanel({
-                    nodeElement: this.getEditor().protyle.wysiwyg.element.firstElementChild as HTMLElement,
-                    protyle: this.getEditor().protyle,
-                    focusName: "custom",
-                });
-            },
-        });
-        menu.addItem({
-            icon: "iconInfo",
-            label: "Dialog(open doc first)",
-            accelerator: this.commands[0].customHotkey,
-            click: () => {
-                this.showDialog();
-            },
-        });
-        menu.addItem({
-            icon: "iconFocus",
-            label: "Select Opened Doc(open doc first)",
-            click: () => {
-                (getModelByDockType("file") as Files).selectItem(
-                    this.getEditor().protyle.notebookId,
-                    this.getEditor().protyle.path,
-                );
-            },
-        });
-        if (!this.isMobile) {
-            menu.addItem({
-                icon: "iconFace",
-                label: "Open Custom Tab",
-                click: () => {
-                    const tab = openTab({
-                        app: this.app,
-                        custom: {
-                            icon: "iconFace",
-                            title: "Custom Tab",
-                            data: {
-                                text: platformUtils.isHuawei() ? "Hello, Huawei!" : "This is my custom tab",
-                            },
-                            id: this.name + TAB_TYPE,
-                        },
-                    });
-                    console.log(tab);
-                },
-            });
-            menu.addItem({
-                icon: "iconImage",
-                label: "Open Asset Tab(First open the Chinese help document)",
-                click: () => {
-                    const tab = openTab({
-                        app: this.app,
-                        asset: {
-                            path: "assets/paragraph-20210512165953-ag1nib4.svg",
-                        },
-                    });
-                    console.log(tab);
-                },
-            });
-            menu.addItem({
-                icon: "iconFile",
-                label: "Open Doc Tab(open doc first)",
-                click: async () => {
-                    const tab = await openTab({
-                        app: this.app,
-                        doc: {
-                            id: this.getEditor().protyle.block.rootID,
-                        },
-                    });
-                    console.log(tab);
-                },
-            });
-            menu.addItem({
-                icon: "iconSearch",
-                label: "Open Search Tab",
-                click: () => {
-                    const tab = openTab({
-                        app: this.app,
-                        search: {
-                            k: "SiYuan",
-                        },
-                    });
-                    console.log(tab);
-                },
-            });
-            menu.addItem({
-                icon: "iconRiffCard",
-                label: "Open Card Tab",
-                click: () => {
-                    const tab = openTab({
-                        app: this.app,
-                        card: {
-                            type: "all",
-                        },
-                    });
-                    console.log(tab);
-                },
-            });
-            menu.addItem({
-                icon: "iconLayout",
-                label: "Open Float Layer(open doc first)",
-                click: () => {
-                    this.addFloatLayer({
-                        refDefs: [{refID: this.getEditor().protyle.block.rootID}],
-                        x: window.innerWidth - 768 - 120,
-                        y: 32,
-                        isBacklink: false,
-                    });
-                },
-            });
-            menu.addItem({
-                icon: "iconOpenWindow",
-                label: "Open Doc Window(open doc first)",
-                click: () => {
-                    openWindow({
-                        doc: {id: this.getEditor().protyle.block.rootID},
-                    });
-                },
-            });
+        togglApi.setToken(this.config.token);
+        await this.saveConfig();
+        this.projectsLoadPromise = null;
+        this.tagsLoadPromise = null;
+        if (this.config.statusBarTimer && this.config.token) {
+            await this.startStatusBarTimer(true);
         } else {
-            menu.addItem({
-                icon: "iconFile",
-                label: "Open Doc(open doc first)",
-                click: () => {
-                    openMobileFileById(this.app, this.getEditor().protyle.block.rootID);
-                },
-            });
+            this.stopStatusBarTimer();
+            this.renderIdleState();
         }
-        menu.addItem({
-            icon: "iconLock",
-            label: "Lockscreen",
-            click: () => {
-                lockScreen(this.app);
-            },
-        });
-        menu.addItem({
-            icon: "iconQuit",
-            label: "Exit Application",
-            click: () => {
-                exitSiYuan();
-            },
-        });
-        menu.addItem({
-            icon: "iconDownload",
-            label: "Save Layout",
-            click: () => {
-                saveLayout(() => {
-                    showMessage("Layout saved");
-                });
-            },
-        });
-        menu.addItem({
-            icon: "iconScrollHoriz",
-            label: "Event Bus",
-            type: "submenu",
-            submenu: [{
-                icon: "iconSelect",
-                label: "On ws-main",
-                click: () => {
-                    this.eventBus.on("ws-main", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off ws-main",
-                click: () => {
-                    this.eventBus.off("ws-main", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On click-blockicon",
-                click: () => {
-                    this.eventBus.on("click-blockicon", this.blockIconEventBindThis);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off click-blockicon",
-                click: () => {
-                    this.eventBus.off("click-blockicon", this.blockIconEventBindThis);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On click-pdf",
-                click: () => {
-                    this.eventBus.on("click-pdf", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off click-pdf",
-                click: () => {
-                    this.eventBus.off("click-pdf", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On click-editorcontent",
-                click: () => {
-                    this.eventBus.on("click-editorcontent", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off click-editorcontent",
-                click: () => {
-                    this.eventBus.off("click-editorcontent", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On click-editortitleicon",
-                click: () => {
-                    this.eventBus.on("click-editortitleicon", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off click-editortitleicon",
-                click: () => {
-                    this.eventBus.off("click-editortitleicon", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On click-flashcard-action",
-                click: () => {
-                    this.eventBus.on("click-flashcard-action", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off click-flashcard-action",
-                click: () => {
-                    this.eventBus.off("click-flashcard-action", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-noneditableblock",
-                click: () => {
-                    this.eventBus.on("open-noneditableblock", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-noneditableblock",
-                click: () => {
-                    this.eventBus.off("open-noneditableblock", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On loaded-protyle-static",
-                click: () => {
-                    this.eventBus.on("loaded-protyle-static", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off loaded-protyle-static",
-                click: () => {
-                    this.eventBus.off("loaded-protyle-static", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On loaded-protyle-dynamic",
-                click: () => {
-                    this.eventBus.on("loaded-protyle-dynamic", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off loaded-protyle-dynamic",
-                click: () => {
-                    this.eventBus.off("loaded-protyle-dynamic", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On switch-protyle",
-                click: () => {
-                    this.eventBus.on("switch-protyle", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off switch-protyle",
-                click: () => {
-                    this.eventBus.off("switch-protyle", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On destroy-protyle",
-                click: () => {
-                    this.eventBus.on("destroy-protyle", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off destroy-protyle",
-                click: () => {
-                    this.eventBus.off("destroy-protyle", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-doctree",
-                click: () => {
-                    this.eventBus.on("open-menu-doctree", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-doctree",
-                click: () => {
-                    this.eventBus.off("open-menu-doctree", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-blockref",
-                click: () => {
-                    this.eventBus.on("open-menu-blockref", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-blockref",
-                click: () => {
-                    this.eventBus.off("open-menu-blockref", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-fileannotationref",
-                click: () => {
-                    this.eventBus.on("open-menu-fileannotationref", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-fileannotationref",
-                click: () => {
-                    this.eventBus.off("open-menu-fileannotationref", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-tag",
-                click: () => {
-                    this.eventBus.on("open-menu-tag", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-tag",
-                click: () => {
-                    this.eventBus.off("open-menu-tag", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-link",
-                click: () => {
-                    this.eventBus.on("open-menu-link", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-link",
-                click: () => {
-                    this.eventBus.off("open-menu-link", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-image",
-                click: () => {
-                    this.eventBus.on("open-menu-image", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-image",
-                click: () => {
-                    this.eventBus.off("open-menu-image", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-av",
-                click: () => {
-                    this.eventBus.on("open-menu-av", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-av",
-                click: () => {
-                    this.eventBus.off("open-menu-av", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-content",
-                click: () => {
-                    this.eventBus.on("open-menu-content", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-content",
-                click: () => {
-                    this.eventBus.off("open-menu-content", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-breadcrumbmore",
-                click: () => {
-                    this.eventBus.on("open-menu-breadcrumbmore", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-breadcrumbmore",
-                click: () => {
-                    this.eventBus.off("open-menu-breadcrumbmore", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-menu-inbox",
-                click: () => {
-                    this.eventBus.on("open-menu-inbox", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-menu-inbox",
-                click: () => {
-                    this.eventBus.off("open-menu-inbox", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On input-search",
-                click: () => {
-                    this.eventBus.on("input-search", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off input-search",
-                click: () => {
-                    this.eventBus.off("input-search", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On paste",
-                click: () => {
-                    this.eventBus.on("paste", this.eventBusPaste);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off paste",
-                click: () => {
-                    this.eventBus.off("paste", this.eventBusPaste);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-siyuan-url-plugin",
-                click: () => {
-                    this.eventBus.on("open-siyuan-url-plugin", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-siyuan-url-plugin",
-                click: () => {
-                    this.eventBus.off("open-siyuan-url-plugin", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On open-siyuan-url-block",
-                click: () => {
-                    this.eventBus.on("open-siyuan-url-block", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off open-siyuan-url-block",
-                click: () => {
-                    this.eventBus.off("open-siyuan-url-block", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On opened-notebook",
-                click: () => {
-                    this.eventBus.on("opened-notebook", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off opened-notebook",
-                click: () => {
-                    this.eventBus.off("opened-notebook", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On closed-notebook",
-                click: () => {
-                    this.eventBus.on("closed-notebook", this.eventBusLog);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off closed-notebook",
-                click: () => {
-                    this.eventBus.off("closed-notebook", this.eventBusLog);
-                },
-            }, {
-                icon: "iconSelect",
-                label: "On kernel-plugin-state-change",
-                click: () => {
-                    this.eventBus.on("kernel-plugin-state-change", this.onKernelPluginStateChange);
-                },
-            }, {
-                icon: "iconClose",
-                label: "Off kernel-plugin-state-change",
-                click: () => {
-                    this.eventBus.off("kernel-plugin-state-change", this.onKernelPluginStateChange);
-                },
-            }],
-        });
-        menu.addSeparator();
-        menu.addItem({
-            icon: "iconSparkles",
-            label: this.data[STORAGE_NAME].readonlyText || "Readonly",
-            type: "readonly",
-        });
-        if (this.isMobile) {
-            menu.fullscreen();
-        } else {
-            menu.open({
-                x: rect.right,
-                y: rect.bottom,
-                isLeft: true,
-            });
-        }
+        this.setupAutoSync();
     }
 
-    private getEditor() {
-        const editors = getAllEditor();
-        if (editors.length === 0) {
-            showMessage("please open doc first");
+    // ==================== 思源 -> Toggl ====================
+
+    private async openStartTimerDialog() {
+        if (!this.config.token) {
+            showMessage("请先配置 Toggl API Token", 4000, "error");
             return;
         }
-        return editors[0];
+        await this.refreshProjects();
+        await this.refreshTags();
+
+        const dialog = new Dialog({
+            title: "开始 Toggl 计时",
+            content: `<div class="b3-dialog__content" style="padding:16px;">
+                <div class="fn__flex" style="flex-direction:column;gap:14px;">
+                    <div>
+                        <label class="b3-label" style="display:block;margin-bottom:4px;font-weight:bold;">描述</label>
+                        <input id="ts-start-desc" class="b3-text-field" style="width:100%;" placeholder="正在做什么">
+                    </div>
+                    <div>
+                        <label class="b3-label" style="display:block;margin-bottom:4px;font-weight:bold;">项目</label>
+                        <div class="toggl-sync__dialog-row">
+                            <select id="ts-start-project" class="b3-select toggl-sync__dialog-control">${this.renderProjectOptions()}</select>
+                            <button id="ts-start-refresh-projects" class="b3-button b3-button--outline toggl-sync__dialog-action" type="button">刷新</button>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="b3-label" style="display:block;margin-bottom:4px;font-weight:bold;">标签</label>
+                        <div class="toggl-sync__dialog-row">
+                            <input id="ts-start-tags" class="b3-text-field toggl-sync__dialog-control" list="ts-start-tags-list" placeholder="多个标签用逗号分隔">
+                            <datalist id="ts-start-tags-list">${this.renderTagOptions()}</datalist>
+                            <button id="ts-start-refresh-tags" class="b3-button b3-button--outline toggl-sync__dialog-action" type="button">刷新</button>
+                        </div>
+                    </div>
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <input id="ts-start-billable" type="checkbox" class="b3-switch">
+                        <span>可计费</span>
+                    </label>
+                </div>
+            </div>
+            <div class="b3-dialog__action">
+                <button class="b3-button b3-button--cancel" id="ts-start-cancel">取消</button>
+                <div class="fn__space"></div>
+                <button class="b3-button b3-button--text" id="ts-start-submit">开始</button>
+            </div>`,
+            width: "480px",
+        });
+
+        const el = dialog.element;
+        el.querySelector("#ts-start-cancel").addEventListener("click", () => dialog.destroy());
+        el.querySelector("#ts-start-refresh-projects").addEventListener("click", async () => {
+            await this.refreshProjectSelect(
+                el.querySelector("#ts-start-refresh-projects") as HTMLButtonElement,
+                el.querySelector("#ts-start-project") as HTMLSelectElement,
+            );
+        });
+        el.querySelector("#ts-start-refresh-tags").addEventListener("click", async () => {
+            await this.refreshTagDatalist(
+                el.querySelector("#ts-start-refresh-tags") as HTMLButtonElement,
+                el.querySelector("#ts-start-tags-list") as HTMLDataListElement,
+            );
+        });
+        el.querySelector("#ts-start-submit").addEventListener("click", async () => {
+            const button = el.querySelector("#ts-start-submit") as HTMLButtonElement;
+            button.disabled = true;
+            const description = (el.querySelector("#ts-start-desc") as HTMLInputElement).value.trim();
+            const projectId = Number((el.querySelector("#ts-start-project") as HTMLSelectElement).value) || undefined;
+            const tags = this.parseTags((el.querySelector("#ts-start-tags") as HTMLInputElement).value);
+            const billable = (el.querySelector("#ts-start-billable") as HTMLInputElement).checked;
+
+            const started = await this.startTogglTimer({description, projectId, tags, billable});
+            button.disabled = false;
+            if (started) {
+                dialog.destroy();
+            }
+        });
+    }
+
+    private async openManualEntryDialog() {
+        if (!this.config.token) {
+            showMessage("请先配置 Toggl API Token", 4000, "error");
+            return;
+        }
+        await this.refreshProjects();
+        await this.refreshTags();
+
+        const dialog = new Dialog({
+            title: "补录 Toggl 条目",
+            content: `<div class="b3-dialog__content" style="padding:16px;">
+                <div class="fn__flex" style="flex-direction:column;gap:14px;">
+                    <div>
+                        <label class="b3-label" style="display:block;margin-bottom:4px;font-weight:bold;">描述</label>
+                        <input id="ts-manual-desc" class="b3-text-field" style="width:100%;" placeholder="做了什么">
+                    </div>
+                    <div>
+                        <label class="b3-label" style="display:block;margin-bottom:4px;font-weight:bold;">开始时间</label>
+                        <input id="ts-manual-start" class="b3-text-field" type="datetime-local" style="width:100%;" value="${
+                this.toDateTimeInputValue(new Date())
+            }">
+                    </div>
+                    <div>
+                        <label class="b3-label" style="display:block;margin-bottom:4px;font-weight:bold;">时长（分钟）</label>
+                        <input id="ts-manual-duration" class="b3-text-field" type="number" min="1" step="1" style="width:100%;" value="30">
+                    </div>
+                    <div>
+                        <label class="b3-label" style="display:block;margin-bottom:4px;font-weight:bold;">项目</label>
+                        <div class="toggl-sync__dialog-row">
+                            <select id="ts-manual-project" class="b3-select toggl-sync__dialog-control">${this.renderProjectOptions()}</select>
+                            <button id="ts-manual-refresh-projects" class="b3-button b3-button--outline toggl-sync__dialog-action" type="button">刷新</button>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="b3-label" style="display:block;margin-bottom:4px;font-weight:bold;">标签</label>
+                        <div class="toggl-sync__dialog-row">
+                            <input id="ts-manual-tags" class="b3-text-field toggl-sync__dialog-control" list="ts-manual-tags-list" placeholder="多个标签用逗号分隔">
+                            <datalist id="ts-manual-tags-list">${this.renderTagOptions()}</datalist>
+                            <button id="ts-manual-refresh-tags" class="b3-button b3-button--outline toggl-sync__dialog-action" type="button">刷新</button>
+                        </div>
+                    </div>
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <input id="ts-manual-billable" type="checkbox" class="b3-switch">
+                        <span>可计费</span>
+                    </label>
+                </div>
+            </div>
+            <div class="b3-dialog__action">
+                <button class="b3-button b3-button--cancel" id="ts-manual-cancel">取消</button>
+                <div class="fn__space"></div>
+                <button class="b3-button b3-button--text" id="ts-manual-submit">保存</button>
+            </div>`,
+            width: "480px",
+        });
+
+        const el = dialog.element;
+        el.querySelector("#ts-manual-cancel").addEventListener("click", () => dialog.destroy());
+        el.querySelector("#ts-manual-refresh-projects").addEventListener("click", async () => {
+            await this.refreshProjectSelect(
+                el.querySelector("#ts-manual-refresh-projects") as HTMLButtonElement,
+                el.querySelector("#ts-manual-project") as HTMLSelectElement,
+            );
+        });
+        el.querySelector("#ts-manual-refresh-tags").addEventListener("click", async () => {
+            await this.refreshTagDatalist(
+                el.querySelector("#ts-manual-refresh-tags") as HTMLButtonElement,
+                el.querySelector("#ts-manual-tags-list") as HTMLDataListElement,
+            );
+        });
+        el.querySelector("#ts-manual-submit").addEventListener("click", async () => {
+            const button = el.querySelector("#ts-manual-submit") as HTMLButtonElement;
+            button.disabled = true;
+            const description = (el.querySelector("#ts-manual-desc") as HTMLInputElement).value.trim();
+            const startValue = (el.querySelector("#ts-manual-start") as HTMLInputElement).value;
+            const durationMinutes = Number((el.querySelector("#ts-manual-duration") as HTMLInputElement).value);
+            const projectId = Number((el.querySelector("#ts-manual-project") as HTMLSelectElement).value) || undefined;
+            const tags = this.parseTags((el.querySelector("#ts-manual-tags") as HTMLInputElement).value);
+            const billable = (el.querySelector("#ts-manual-billable") as HTMLInputElement).checked;
+
+            const created = await this.createManualTogglEntry({
+                description,
+                start: new Date(startValue),
+                durationSeconds: Math.round(durationMinutes * 60),
+                projectId,
+                tags,
+                billable,
+            });
+            button.disabled = false;
+            if (created) {
+                dialog.destroy();
+            }
+        });
+    }
+
+    private async startTogglTimer(input: {
+        description: string;
+        projectId?: number;
+        tags: string[];
+        billable: boolean;
+    }): Promise<boolean> {
+        const workspaceId = await this.ensureWorkspaceId();
+        if (!workspaceId) return false;
+
+        const start = new Date();
+        const response = await togglApi.createTimeEntry(workspaceId, {
+            workspace_id: workspaceId,
+            description: input.description || "无描述",
+            start: start.toISOString(),
+            duration: -1,
+            created_with: "siyuan-toggl-sync",
+            project_id: input.projectId,
+            tags: input.tags,
+            tag_action: input.tags.length > 0 ? "add" : undefined,
+            billable: input.billable,
+        });
+
+        if (!response.ok) {
+            await this.queuePendingOp({
+                type: "start",
+                description: input.description,
+                projectId: input.projectId,
+                tags: input.tags,
+                billable: input.billable,
+                start: start.toISOString(),
+            });
+            this.lastEntryId = 0;
+            this.lastEntryDescription = input.description || "";
+            this.lastEntryStart = start.toISOString();
+            this.config.currentTimer = {
+                id: 0,
+                workspaceId,
+                description: input.description || "",
+                start: start.toISOString(),
+            };
+            await this.saveConfig();
+            return true;
+        }
+
+        await this.updateCurrentTimerFromEntry(response.data);
+        showMessage("Toggl 计时已开始", 2000, "info");
+        return true;
+    }
+
+    private async createManualTogglEntry(input: {
+        description: string;
+        start: Date;
+        durationSeconds: number;
+        projectId?: number;
+        tags: string[];
+        billable: boolean;
+    }): Promise<boolean> {
+        if (!Number.isFinite(input.start.getTime()) || input.durationSeconds <= 0) {
+            showMessage("请填写有效的开始时间和时长", 4000, "error");
+            return false;
+        }
+
+        const workspaceId = await this.ensureWorkspaceId();
+        if (!workspaceId) return false;
+
+        const stop = new Date(input.start.getTime() + input.durationSeconds * 1000);
+        const response = await togglApi.createTimeEntry(workspaceId, {
+            workspace_id: workspaceId,
+            description: input.description || "无描述",
+            start: input.start.toISOString(),
+            stop: stop.toISOString(),
+            duration: input.durationSeconds,
+            created_with: "siyuan-toggl-sync",
+            project_id: input.projectId,
+            tags: input.tags,
+            tag_action: input.tags.length > 0 ? "add" : undefined,
+            billable: input.billable,
+        });
+
+        if (!response.ok) {
+            await this.queuePendingOp({
+                type: "manual",
+                description: input.description,
+                start: input.start.toISOString(),
+                durationSeconds: input.durationSeconds,
+                projectId: input.projectId,
+                tags: input.tags,
+                billable: input.billable,
+            });
+            return true;
+        }
+
+        if (this.config.targetDocId) {
+            await this.addEntries([response.data]);
+        }
+        showMessage("Toggl 条目已补录", 2000, "info");
+        return true;
+    }
+
+    private async stopCurrentTimer() {
+        if (!this.config.token) {
+            showMessage("请先配置 Toggl API Token", 4000, "error");
+            return;
+        }
+
+        const workspaceId = await this.ensureWorkspaceId();
+        if (!workspaceId) return;
+
+        let entryId = this.lastEntryId;
+        if (!entryId) {
+            showMessage("本地没有当前计时 ID，请先手动刷新当前 Toggl 计时", 4000, "error");
+            return;
+        }
+
+        // entryId === 0 表示对应的 start 还在 pending 中，直接移除即可
+        if (entryId === 0) {
+            this.config.pendingOps = this.config.pendingOps.filter(op => op.type !== "start");
+            await this.clearCurrentTimer();
+            showMessage("已取消待同步的计时", 2000, "info");
+            return;
+        }
+
+        const response = await togglApi.stopTimeEntry(workspaceId, entryId);
+        if (!response.ok) {
+            await this.queuePendingOp({type: "stop", entryId, workspaceId});
+            await this.clearCurrentTimer();
+            return;
+        }
+
+        await this.clearCurrentTimer();
+        if (this.config.targetDocId) {
+            await this.addEntries([response.data]);
+        }
+        showMessage("Toggl 计时已停止", 2000, "info");
+    }
+
+    private async flushPendingOps(): Promise<number> {
+        if (this.config.pendingOps.length === 0) return 0;
+
+        let flushed = 0;
+        const remaining: PendingOp[] = [];
+
+        for (const op of this.config.pendingOps) {
+            if (op.type === "start") {
+                const workspaceId = await this.ensureWorkspaceId();
+                if (!workspaceId) {
+                    remaining.push(op);
+                    break;
+                }
+                const response = await togglApi.createTimeEntry(workspaceId, {
+                    workspace_id: workspaceId,
+                    description: op.description || "无描述",
+                    start: op.start,
+                    duration: -1,
+                    created_with: "siyuan-toggl-sync",
+                    project_id: op.projectId,
+                    tags: op.tags,
+                    tag_action: op.tags.length > 0 ? "add" : undefined,
+                    billable: op.billable,
+                });
+                if (!response.ok) {
+                    remaining.push(op);
+                    break;
+                }
+                await this.updateCurrentTimerFromEntry(response.data);
+                flushed++;
+            } else if (op.type === "stop") {
+                const response = await togglApi.stopTimeEntry(op.workspaceId, op.entryId);
+                if (response.ok) {
+                    if (this.config.targetDocId) {
+                        await this.addEntries([response.data]);
+                    }
+                    await this.clearCurrentTimer();
+                    flushed++;
+                } else if (response.status === 404 || response.status === 409) {
+                    flushed++;
+                } else {
+                    remaining.push(op);
+                    break;
+                }
+            } else if (op.type === "manual") {
+                const workspaceId = await this.ensureWorkspaceId();
+                if (!workspaceId) {
+                    remaining.push(op);
+                    break;
+                }
+                const stop = new Date(new Date(op.start).getTime() + op.durationSeconds * 1000);
+                const response = await togglApi.createTimeEntry(workspaceId, {
+                    workspace_id: workspaceId,
+                    description: op.description || "无描述",
+                    start: op.start,
+                    duration: op.durationSeconds,
+                    created_with: "siyuan-toggl-sync",
+                    project_id: op.projectId,
+                    tags: op.tags,
+                    tag_action: op.tags.length > 0 ? "add" : undefined,
+                    billable: op.billable,
+                    stop: stop.toISOString(),
+                });
+                if (!response.ok) {
+                    remaining.push(op);
+                    break;
+                }
+                if (this.config.targetDocId) {
+                    await this.addEntries([response.data]);
+                }
+                flushed++;
+            }
+        }
+
+        this.config.pendingOps = remaining;
+        await this.saveConfig();
+        return flushed;
+    }
+
+    private async getTargetDatabase(): Promise<TargetDatabase | null> {
+        const avId = await this.findOrMountTargetDatabase();
+        if (!avId) {
+            if (!this.suppressDatabasePrompt) {
+                showMessage("目标文档没有 Toggl Sync 数据库，请在插件设置中点击“新建数据库”", 5000, "error");
+            }
+            return null;
+        }
+
+        if (this.config.avId !== avId) {
+            this.config.avId = avId;
+            this.config.statusOptionsPreparedAvId = "";
+            await this.saveConfig();
+        }
+
+        const keys = await this.ensureDatabaseFields(avId);
+        await this.ensureSyncStatusOptions({avId, keys});
+
+        return {avId, keys};
+    }
+
+    private async findOrMountTargetDatabase(): Promise<string | null> {
+        const targetDocId = this.config.targetDocId;
+        const targetId = this.escapeSql(targetDocId);
+        const blocks = await this.sql(
+            `SELECT * FROM blocks WHERE id = '${targetId}' AND type = 'av'
+             UNION ALL
+             SELECT * FROM blocks WHERE root_id = '${targetId}' AND type = 'av'
+             ORDER BY updated DESC`,
+        );
+        let avId = this.findConfiguredAvId(blocks || []);
+
+        if (!avId && this.config.avId) {
+            const mountedAvId = await this.findDatabaseAvIdInDocument(targetDocId, this.config.avId);
+            if (mountedAvId) return mountedAvId;
+
+            avId = this.config.avId;
+            showMessage("目标文档没有挂载数据库，正在挂载已有 Toggl Sync 数据库...", 3000, "info");
+            const mounted = await this.insertDatabaseBlock(targetDocId, avId);
+            if (!mounted) return null;
+        }
+
+        return avId;
+    }
+
+    private findConfiguredAvId(blocks: any[]): string | null {
+        if (!this.config.avId) return null;
+        for (const block of blocks) {
+            const avId = this.extractAvId(block);
+            if (avId === this.config.avId) return avId;
+        }
+        return null;
+    }
+
+    private async createTargetDatabaseFromSettings(): Promise<void> {
+        if (!this.config.targetDocId) {
+            showMessage("请先配置目标文档 ID", 4000, "error");
+            return;
+        }
+
+        const existingAvId = await this.findOrMountTargetDatabase();
+        if (existingAvId) {
+            this.config.avId = existingAvId;
+            await this.saveConfig();
+            const keys = await this.ensureDatabaseFields(existingAvId);
+            await this.ensureSyncStatusOptions({avId: existingAvId, keys});
+            showMessage("目标文档已存在 Toggl Sync 数据库", 3000, "info");
+            return;
+        }
+
+        const avId = await this.createDatabase(this.config.targetDocId);
+        if (!avId) return;
+
+        this.config.avId = avId;
+        await this.saveConfig();
+        const keys = await this.ensureDatabaseFields(avId);
+        await this.ensureSyncStatusOptions({avId, keys});
+        showMessage("已新建空白 Toggl Sync 数据库", 3000, "info");
+    }
+
+    private async createDatabase(docId: string): Promise<string | null> {
+        const avId = this.createSiyuanId();
+        showMessage("正在创建 Toggl Sync 数据库...", 2000, "info");
+        const createResult = await this.fetchSiyuanPostAllowEmpty("/api/av/createAttributeView", {
+            avID: avId,
+            name: "Toggl Sync",
+        });
+        if (!this.isSiyuanOk(createResult)) {
+            console.error("[TogglSync] createAttributeView failed:", JSON.stringify(createResult));
+            showMessage(`创建数据库失败: ${createResult?.msg ?? this.formatUnknownError(createResult)}`, 5000, "error");
+            return null;
+        }
+
+        const inserted = await this.insertDatabaseBlock(docId, avId);
+        if (!inserted) {
+            showMessage("数据库已创建，但挂载到目标文档失败，请查看控制台日志", 5000, "error");
+            return null;
+        }
+
+        return avId;
+    }
+
+    private async insertDatabaseBlock(docId: string, avId: string): Promise<boolean> {
+        const viewId = await this.getDatabaseViewId(avId);
+        const customViewAttr = viewId ? ` custom-sy-av-view="${viewId}"` : "";
+        const domData =
+            `<div data-node-id="${this.createSiyuanId()}" data-type="NodeAttributeView"${customViewAttr} data-av-id="${avId}" data-av-type="table"></div>`;
+        const domResult = await fetchSyncPost("/api/block/appendBlock", {
+            dataType: "dom",
+            data: domData,
+            parentID: docId,
+        });
+        if (await this.isDatabaseBlockInserted(docId, avId, domResult)) {
+            return true;
+        }
+        console.warn("[TogglSync] appendBlock dom did not mount database:", JSON.stringify(domResult));
+
+        const markdownResult = await fetchSyncPost("/api/block/insertBlock", {
+            dataType: "markdown",
+            data: domData,
+            parentID: docId,
+        });
+        if (await this.isDatabaseBlockInserted(docId, avId, markdownResult)) {
+            return true;
+        }
+        console.error("[TogglSync] insertBlock markdown did not mount database:", JSON.stringify(markdownResult));
+        return false;
+    }
+
+    private async getDatabaseViewId(avId: string): Promise<string> {
+        const renderResult = await this.renderDatabase(avId);
+        if (renderResult.code === 0) {
+            return renderResult.data?.viewID ?? renderResult.data?.view?.id ?? renderResult.data?.view?.viewID ?? "";
+        }
+
+        const avResult = await fetchSyncPost("/api/av/getAttributeView", {id: avId});
+        if (avResult.code === 0) {
+            return avResult.data?.viewID ?? avResult.data?.views?.[0]?.id ?? "";
+        }
+
+        return "";
+    }
+
+    private async isDatabaseBlockInserted(docId: string, avId: string, result: any): Promise<boolean> {
+        if (!this.isSiyuanOk(result)) return false;
+        const responseAvId = this.extractAvIdFromBlockApiResponse(result);
+        if (responseAvId === avId) return true;
+        if (responseAvId) {
+            console.warn(
+                "[TogglSync] insert database block response included unexpected avId:",
+                JSON.stringify(result),
+            );
+        }
+
+        for (let attempt = 0; attempt < 3; attempt++) {
+            await this.sleep(500);
+            if (await this.findDatabaseAvIdInDocument(docId, avId) === avId) return true;
+        }
+        return false;
+    }
+
+    private isSiyuanOk(result: any): boolean {
+        return result === "" || result?.code === 0;
+    }
+
+    private async fetchSiyuanPostAllowEmpty(url: string, data: any): Promise<any> {
+        const response = await fetch(url, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(data),
+        });
+        const text = await response.text();
+        if (!response.ok) {
+            return {code: -1, msg: text || `HTTP ${response.status}`};
+        }
+        if (!text.trim()) return "";
+        try {
+            return JSON.parse(text);
+        } catch (error) {
+            return {code: -1, msg: this.formatUnknownError(error), data: text};
+        }
+    }
+
+    private async ensureDatabaseFields(avId: string): Promise<AttributeViewKey[]> {
+        let keys = await this.loadDatabaseKeys(avId);
+        let previousKeyID = keys[keys.length - 1]?.id ?? "";
+        let addedCount = 0;
+
+        for (const field of TOGGL_DATABASE_FIELDS) {
+            if (this.findKey(keys, field.aliases)) continue;
+
+            const keyID = this.createSiyuanId();
+            const result = await fetchSyncPost("/api/av/addAttributeViewKey", {
+                avID: avId,
+                keyID,
+                keyName: field.name,
+                keyType: field.type,
+                keyIcon: "",
+                previousKeyID,
+            });
+
+            if (result.code !== 0) {
+                console.error("[TogglSync] addAttributeViewKey failed:", field.name, JSON.stringify(result));
+                continue;
+            }
+
+            previousKeyID = keyID;
+            keys.push({id: keyID, name: field.name, type: field.type});
+            addedCount++;
+        }
+
+        if (addedCount > 0) {
+            showMessage(`已补齐数据库字段 ${addedCount} 个`, 3000, "info");
+        }
+
+        const refreshedKeys = await this.loadDatabaseKeys(avId);
+        return this.mergeDatabaseKeys(refreshedKeys, keys);
+    }
+
+    private async ensureSyncStatusOptions(database: TargetDatabase): Promise<void> {
+        if (this.config.statusOptionsPreparedAvId === database.avId) return;
+
+        const key = this.findKey(database.keys, ["同步状态", "Sync Status"]);
+        if (!key) return;
+
+        const rowId = await this.insertDatabaseRow(database.avId);
+        if (!rowId) return;
+
+        try {
+            for (const status of SYNC_STATUS_OPTIONS) {
+                await this.writeSyncStatus(database, rowId, status);
+            }
+        } finally {
+            const txResult = await this.requestTransaction([{
+                action: "removeAttrViewBlock",
+                avID: database.avId,
+                srcIDs: [rowId],
+                removeDest: true,
+            }]);
+            if (!txResult || txResult.code !== 0) {
+                console.warn("[TogglSync] remove sync status option seed row failed:", JSON.stringify(txResult));
+            }
+        }
+
+        this.config.statusOptionsPreparedAvId = database.avId;
+        await this.saveConfig();
+    }
+
+    private async loadDatabaseKeys(avId: string): Promise<AttributeViewKey[]> {
+        const keysResult = await fetchSyncPost("/api/av/getAttributeViewKeysByAvID", {avID: avId});
+        let keys = keysResult.code === 0 ? this.normalizeAttributeViewKeys(keysResult.data) : [];
+        if (keys.length === 0) {
+            const renderResult = await this.renderDatabase(avId);
+            if (renderResult.code === 0) {
+                keys = this.normalizeAttributeViewKeys(renderResult.data);
+            }
+        }
+        return keys;
+    }
+
+    private mergeDatabaseKeys(primary: AttributeViewKey[], fallback: AttributeViewKey[]): AttributeViewKey[] {
+        if (primary.length === 0) return fallback;
+        const merged = [...primary];
+        for (const key of fallback) {
+            if (
+                !merged.some((item) =>
+                    item.id === key.id || this.normalizeKeyName(item.name) === this.normalizeKeyName(key.name)
+                )
+            ) {
+                merged.push(key);
+            }
+        }
+        return merged;
+    }
+
+    private async findDatabaseAvIdInDocument(docId: string, expectedAvId?: string): Promise<string | null> {
+        const kramdown = await this.getBlockKramdown(docId);
+        for (const avId of this.extractAvIdsFromText(kramdown)) {
+            if (!expectedAvId || avId === expectedAvId) return avId;
+        }
+
+        const targetId = this.escapeSql(docId);
+        const blocks = await this.sql(
+            `SELECT * FROM blocks WHERE root_id = '${targetId}' AND type = 'av'
+             ORDER BY updated DESC`,
+        );
+
+        for (const block of blocks || []) {
+            const avId = this.extractAvId(block);
+            if (avId && (!expectedAvId || avId === expectedAvId)) return avId;
+        }
+
+        return null;
+    }
+
+    private async getBlockKramdown(id: string): Promise<string> {
+        const result = await fetchSyncPost("/api/block/getBlockKramdown", {id});
+        if (result.code !== 0) {
+            console.warn("[TogglSync] getBlockKramdown failed:", JSON.stringify(result));
+            return "";
+        }
+        return result.data?.kramdown ?? "";
+    }
+
+    private async insertDatabaseRow(avId: string): Promise<string | null> {
+        const beforeResult = await this.renderDatabase(avId);
+        const before = beforeResult.code === 0 ? this.extractRenderedRowIds(beforeResult.data) : [];
+        const srcId = this.createSiyuanId();
+        const operation: any = {
+            action: "insertAttrViewBlock",
+            avID: avId,
+            srcs: [{id: srcId, isDetached: true}],
+        };
+        if (beforeResult.code === 0 && this.hasActiveViewFilterOrGroup(beforeResult.data)) {
+            operation.ignoreFillFilter = true;
+        }
+        const txResult = await this.requestTransaction([operation]);
+
+        if (!txResult || txResult.code !== 0) {
+            console.error("[TogglSync] insertAttrViewBlock failed:", JSON.stringify(txResult));
+            return null;
+        }
+
+        const after = await this.getRenderedRowIds(avId);
+        const inserted = after.find((id) => before.indexOf(id) === -1);
+        return inserted ?? after[after.length - 1] ?? srcId;
+    }
+
+    private async writeTogglRow(database: TargetDatabase, rowId: string, row: TogglDatabaseRow): Promise<void> {
+        const fields: {aliases: string[]; value: DatabaseCellInput | string[];}[] = [
+            {
+                aliases: ["描述", "Description", "标题", "Title", "名称", "Name", "任务", "事项"],
+                value: row.description || "无描述",
+            },
+            {aliases: ["TogglID", "Toggl ID", "Toggl Id", "toggl-id"], value: row.id},
+            {aliases: ["项目", "Project"], value: row.projectName},
+            {aliases: ["标签", "Tags", "Tag"], value: row.tagNames},
+            {aliases: ["开始", "开始时间", "Start", "Start Time"], value: row.start},
+            {aliases: ["结束", "结束时间", "End", "End Time", "Stop", "Stop Time"], value: row.stop},
+            {aliases: ["日期", "Date"], value: row.start},
+            {aliases: ["时长", "Duration"], value: row.durationSeconds},
+            {
+                aliases: ["时长显示", "持续时间", "Duration Text", "Duration Display"],
+                value: this.formatDuration(row.durationSeconds),
+            },
+            {aliases: ["计费", "可计费", "Billable"], value: row.billable},
+            {aliases: ["同步状态", "Sync Status"], value: row.syncStatus || "正常"},
+        ];
+
+        const writtenKeyIds = new Set<string>();
+        for (const field of fields) {
+            const key = this.findKey(database.keys, field.aliases) ??
+                (field.aliases[0] === "描述" ? this.findPrimaryTextKey(database.keys) : null);
+            if (!key || writtenKeyIds.has(key.id) || this.isEmptyCellInput(field.value)) continue;
+
+            const value = this.buildCellValue(key, rowId, field.value);
+            if (!value) continue;
+
+            const result = await fetchSyncPost("/api/av/setAttributeViewBlockAttr", {
+                avID: database.avId,
+                keyID: key.id,
+                rowID: rowId,
+                itemID: rowId,
+                value,
+            });
+            if (result.code !== 0) {
+                console.error("[TogglSync] setAttributeViewBlockAttr failed:", key.name, JSON.stringify(result));
+            } else {
+                writtenKeyIds.add(key.id);
+            }
+        }
+    }
+
+    private async writeSyncStatus(database: TargetDatabase, rowId: string, status: SyncStatus): Promise<void> {
+        const key = this.findKey(database.keys, ["同步状态", "Sync Status"]);
+        if (!key) return;
+        const value = this.buildCellValue(key, rowId, status);
+        if (!value) return;
+        const result = await fetchSyncPost("/api/av/setAttributeViewBlockAttr", {
+            avID: database.avId,
+            keyID: key.id,
+            rowID: rowId,
+            itemID: rowId,
+            value,
+        });
+        if (result.code !== 0) {
+            console.error("[TogglSync] writeSyncStatus failed:", status, JSON.stringify(result));
+        }
+    }
+
+    // ==================== 同步逻辑 ====================
+
+    private async syncEntries(mode: SyncMode = "regular") {
+        if (this.syncInProgress) {
+            showMessage("同步正在进行中，请稍后", 2500, "info");
+            return;
+        }
+        if (!this.config.token) {
+            showMessage("请先配置 Toggl API Token", 4000, "error");
+            return;
+        }
+        if (!this.config.targetDocId) {
+            showMessage("请先配置目标文档 ID", 4000, "error");
+            return;
+        }
+
+        this.syncInProgress = true;
+        const silent = mode === "auto";
+        if (!silent) {
+            showMessage(mode === "repair" ? "开始首次/修复同步..." : "开始同步 Toggl 数据...", 2000, "info");
+        }
+
+        try {
+            const syncStartedAt = new Date();
+            this.suppressDatabasePrompt = silent;
+            const database = await this.getTargetDatabase();
+            this.suppressDatabasePrompt = false;
+            if (!database) {
+                return;
+            }
+
+            await this.refreshProjects();
+
+            if (this.config.pendingOps.length > 0) {
+                const flushed = await this.flushPendingOps();
+                if (flushed > 0) {
+                    showMessage(`已重试 ${flushed} 条暂存操作`, 2000, "info");
+                }
+            }
+
+            let localRows = await this.readLocalDatabaseRows(database);
+            const localResult = await this.pushLocalChanges(database, localRows);
+            if (localResult.created > 0 || localResult.updated > 0 || localResult.deleted > 0) {
+                localRows = await this.readLocalDatabaseRows(database);
+            }
+
+            const response = mode === "repair" || !this.config.lastSyncTime ?
+                await togglApi.getTimeEntries(this.buildRepairRangeParams()) :
+                await togglApi.getTimeEntries({
+                    since: Math.floor(new Date(this.config.lastSyncTime).getTime() / 1000),
+                });
+            if (!response.ok) {
+                if (!silent) showMessage(this.formatApiError("同步失败", response), 5000, "error");
+                return;
+            }
+
+            const remoteResult = await this.applyRemoteEntries(database, response.data || [], localRows);
+            if (mode === "repair") {
+                remoteResult.markedDeleted += await this.markMissingRowsInRepairRange(
+                    database,
+                    localRows,
+                    response.data || [],
+                );
+            }
+            this.config.lastSyncTime = syncStartedAt.toISOString();
+            await this.saveConfig();
+            const actionText = [
+                localResult.created ? `上传 ${localResult.created}` : "",
+                localResult.updated ? `更新 Toggl ${localResult.updated}` : "",
+                localResult.deleted ? `删除 Toggl ${localResult.deleted}` : "",
+                remoteResult.added ? `新增 ${remoteResult.added}` : "",
+                remoteResult.updated ? `更新本地 ${remoteResult.updated}` : "",
+                remoteResult.markedDeleted ? `标记本地可删除 ${remoteResult.markedDeleted}` : "",
+                localResult.failed ? `失败 ${localResult.failed}` : "",
+                remoteResult.skippedPending ? `跳过待处理 ${remoteResult.skippedPending}` : "",
+            ].filter(Boolean).join("，");
+            if (!silent || actionText || localResult.failed > 0) {
+                showMessage(
+                    `${actionText || "没有需要同步的变更"}${this.formatQuotaText(response)}`,
+                    4000,
+                    localResult.failed > 0 ? "error" : "info",
+                );
+            }
+        } finally {
+            this.suppressDatabasePrompt = false;
+            this.syncInProgress = false;
+        }
+    }
+
+    private loadProjectCache() {
+        this.projects.clear();
+        for (const project of this.config.projectCache || []) {
+            this.projects.set(project.id, project.name);
+            if (!this.config.workspaceId && project.workspace_id) {
+                this.config.workspaceId = project.workspace_id;
+            }
+        }
+    }
+
+    private loadTagCache() {
+        this.tags = [];
+        const tagNames = new Set<string>();
+        for (const tag of this.config.tagCache || []) {
+            if (tag.name) tagNames.add(tag.name);
+            if (!this.config.workspaceId && tag.workspace_id) {
+                this.config.workspaceId = tag.workspace_id;
+            }
+        }
+        this.tags = Array.from(tagNames).sort((a, b) => a.localeCompare(b));
+    }
+
+    private async loadProjects() {
+        const workspaceId = await this.ensureWorkspaceId();
+        if (!workspaceId) return;
+
+        const res = await togglApi.getWorkspaceProjects(workspaceId);
+        if (!res.ok || !res.data) {
+            showMessage(this.formatApiError("刷新 Toggl 项目列表失败", res), 5000, "error");
+            return;
+        }
+
+        this.projects.clear();
+        this.config.projectCache = res.data
+            .filter((p) => p.active !== false)
+            .map((p) => ({
+                id: p.id,
+                name: p.name,
+                workspace_id: p.workspace_id || workspaceId,
+            }));
+        for (const p of this.config.projectCache) {
+            this.projects.set(p.id, p.name);
+        }
+        await this.saveConfig();
+        showMessage(`已刷新 Toggl 项目列表: ${this.projects.size} 个${this.formatQuotaText(res)}`, 3000, "info");
+    }
+
+    private async loadTags() {
+        const workspaceId = await this.ensureWorkspaceId();
+        if (!workspaceId) return;
+
+        const res = await togglApi.getTags();
+        if (!res.ok || !res.data) {
+            showMessage(this.formatApiError("刷新 Toggl 标签列表失败", res), 5000, "error");
+            return;
+        }
+
+        this.config.tagCache = res.data
+            .filter((tag: Tag) => tag.name)
+            .map((tag: Tag) => ({
+                id: tag.id,
+                name: tag.name,
+                workspace_id: tag.workspace_id || workspaceId,
+            }));
+        this.loadTagCache();
+        await this.saveConfig();
+        showMessage(`已刷新 Toggl 标签列表: ${this.tags.length} 个${this.formatQuotaText(res)}`, 3000, "info");
+    }
+
+    private refreshProjects(force = false): Promise<void> {
+        if (!this.config.token) return Promise.resolve();
+        if (!force && this.projects.size > 0) return Promise.resolve();
+        if (!force && this.projectsLoadPromise) return this.projectsLoadPromise;
+
+        this.projectsLoadPromise = this.loadProjects().then(() => {
+            this.projectsLoadPromise = null;
+        }, () => {
+            this.projectsLoadPromise = null;
+        });
+        return this.projectsLoadPromise;
+    }
+
+    private refreshTags(force = false): Promise<void> {
+        if (!this.config.token) return Promise.resolve();
+        if (!force && this.tags.length > 0) return Promise.resolve();
+        if (!force && this.tagsLoadPromise) return this.tagsLoadPromise;
+
+        this.tagsLoadPromise = this.loadTags().then(() => {
+            this.tagsLoadPromise = null;
+        }, () => {
+            this.tagsLoadPromise = null;
+        });
+        return this.tagsLoadPromise;
+    }
+
+    private isDeletedTimeEntry(entry: TimeEntry): boolean {
+        return Boolean(entry.server_deleted_at || entry.deleted_at || entry.deleted);
+    }
+
+    private buildRepairRangeParams(): {start_date?: string; end_date?: string;} {
+        const days = this.normalizeInitialDays(this.config.initialDays);
+        const end = new Date();
+        const start = new Date();
+        start.setTime(end.getTime() - days * 24 * 60 * 60 * 1000);
+        return {
+            start_date: start.toISOString(),
+            end_date: end.toISOString(),
+        };
+    }
+
+    private async pushLocalChanges(
+        database: TargetDatabase,
+        localRows: LocalDatabaseRow[],
+    ): Promise<LocalUploadResult> {
+        const result: LocalUploadResult = {created: 0, updated: 0, deleted: 0, failed: 0};
+        const workspaceId = await this.ensureWorkspaceId();
+        if (!workspaceId) return result;
+
+        for (const row of localRows) {
+            if (row.syncStatus === "本地可删除" || row.syncStatus === "失败") continue;
+            if (!row.togglId && !this.isMeaningfulLocalRow(row)) continue;
+
+            if (!row.togglId) {
+                if (row.syncStatus !== "本地待上传") continue;
+                const input = this.buildCreateInputFromLocalRow(row, workspaceId);
+                if (!input) {
+                    await this.writeSyncStatus(database, row.rowId, "失败");
+                    result.failed++;
+                    continue;
+                }
+                const response = await togglApi.createTimeEntry(workspaceId, input);
+                if (!response.ok) {
+                    await this.writeSyncStatus(database, row.rowId, "失败");
+                    showMessage(this.formatApiError("上传本地条目失败", response), 5000, "error");
+                    result.failed++;
+                    continue;
+                }
+                await this.writeTogglRow(database, row.rowId, this.toDatabaseRow(response.data, "正常"));
+                result.created++;
+                continue;
+            }
+
+            if (row.syncStatus === "Toggl 待更新") {
+                const input = this.buildUpdateInputFromLocalRow(row, workspaceId);
+                if (!input) {
+                    await this.writeSyncStatus(database, row.rowId, "失败");
+                    result.failed++;
+                    continue;
+                }
+                const response = await togglApi.updateTimeEntry(workspaceId, row.togglId, input);
+                if (!response.ok) {
+                    await this.writeSyncStatus(database, row.rowId, "失败");
+                    showMessage(this.formatApiError("更新 Toggl 条目失败", response), 5000, "error");
+                    result.failed++;
+                    continue;
+                }
+                await this.writeTogglRow(database, row.rowId, this.toDatabaseRow(response.data, "正常"));
+                result.updated++;
+            } else if (row.syncStatus === "Toggl 待删除") {
+                const response = await togglApi.deleteTimeEntry(workspaceId, row.togglId);
+                if (!response.ok && response.status !== 404) {
+                    await this.writeSyncStatus(database, row.rowId, "失败");
+                    showMessage(this.formatApiError("删除 Toggl 条目失败", response), 5000, "error");
+                    result.failed++;
+                    continue;
+                }
+                await this.writeSyncStatus(database, row.rowId, "本地可删除");
+                result.deleted++;
+            }
+        }
+
+        return result;
+    }
+
+    private async applyRemoteEntries(
+        database: TargetDatabase,
+        entries: TimeEntry[],
+        localRows: LocalDatabaseRow[],
+    ): Promise<RemoteApplyResult> {
+        const result: RemoteApplyResult = {added: 0, updated: 0, markedDeleted: 0, skippedPending: 0};
+        const rowsByTogglId = new Map<number, LocalDatabaseRow>();
+        for (const row of localRows) {
+            if (row.togglId) rowsByTogglId.set(row.togglId, row);
+        }
+
+        for (const entry of entries) {
+            const local = rowsByTogglId.get(entry.id);
+            if (this.isDeletedTimeEntry(entry)) {
+                if (local && local.syncStatus !== "本地可删除") {
+                    await this.writeSyncStatus(database, local.rowId, "本地可删除");
+                    result.markedDeleted++;
+                }
+                continue;
+            }
+
+            if (local) {
+                if (local.syncStatus === "Toggl 待更新" || local.syncStatus === "Toggl 待删除") {
+                    result.skippedPending++;
+                    continue;
+                }
+                await this.writeTogglRow(database, local.rowId, this.toDatabaseRow(entry, "正常"));
+                result.updated++;
+            } else {
+                await this.addEntries([entry], database);
+                result.added++;
+            }
+        }
+
+        return result;
+    }
+
+    private async markMissingRowsInRepairRange(
+        database: TargetDatabase,
+        localRows: LocalDatabaseRow[],
+        remoteEntries: TimeEntry[],
+    ): Promise<number> {
+        const remoteIds = new Set(
+            remoteEntries.filter((entry) => !this.isDeletedTimeEntry(entry)).map((entry) => entry.id),
+        );
+        const rangeStart = new Date(
+            Date.now() - this.normalizeInitialDays(this.config.initialDays) * 24 * 60 * 60 * 1000,
+        );
+
+        let count = 0;
+        for (const row of localRows) {
+            if (!row.togglId || row.syncStatus === "本地可删除") continue;
+            if (row.syncStatus === "Toggl 待更新" || row.syncStatus === "Toggl 待删除") continue;
+            if (row.start && row.start < rangeStart) continue;
+            if (!remoteIds.has(row.togglId)) {
+                await this.writeSyncStatus(database, row.rowId, "本地可删除");
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private buildCreateInputFromLocalRow(row: LocalDatabaseRow, workspaceId: number): CreateTimeEntryInput | null {
+        if (!row.start) return null;
+        const duration = this.resolveDurationSeconds(row);
+        const stop = row.stop ?? (duration > 0 ? new Date(row.start.getTime() + duration * 1000) : null);
+        return {
+            workspace_id: workspaceId,
+            description: row.description || "无描述",
+            start: row.start.toISOString(),
+            stop: stop ? stop.toISOString() : undefined,
+            duration: duration > 0 ? duration : -1,
+            created_with: "siyuan-toggl-sync",
+            project_id: this.findProjectIdByName(row.projectName),
+            tags: row.tagNames,
+            tag_action: row.tagNames.length > 0 ? "add" : undefined,
+            billable: row.billable,
+        };
+    }
+
+    private buildUpdateInputFromLocalRow(row: LocalDatabaseRow, workspaceId: number): UpdateTimeEntryInput | null {
+        if (!row.start) return null;
+        const duration = this.resolveDurationSeconds(row);
+        const stop = row.stop ?? (duration > 0 ? new Date(row.start.getTime() + duration * 1000) : null);
+        return {
+            workspace_id: workspaceId,
+            description: row.description || "无描述",
+            start: row.start.toISOString(),
+            stop: stop ? stop.toISOString() : null,
+            duration: duration > 0 ? duration : -1,
+            project_id: this.findProjectIdByName(row.projectName) ?? null,
+            tags: row.tagNames,
+            tag_action: "add",
+            billable: row.billable,
+        };
+    }
+
+    private resolveDurationSeconds(row: LocalDatabaseRow): number {
+        if (row.durationSeconds > 0) return row.durationSeconds;
+        if (row.start && row.stop) return Math.max(0, Math.round((row.stop.getTime() - row.start.getTime()) / 1000));
+        return 0;
+    }
+
+    private findProjectIdByName(name: string): number | undefined {
+        const normalized = name.trim();
+        if (!normalized) return undefined;
+        for (const [id, projectName] of this.projects.entries()) {
+            if (projectName === normalized) return id;
+        }
+        const numeric = Number(normalized);
+        return Number.isFinite(numeric) ? numeric : undefined;
+    }
+
+    private toDatabaseRow(entry: TimeEntry, syncStatus: SyncStatus = "正常"): TogglDatabaseRow {
+        const projectName = entry.project_id ?
+            this.projects.get(entry.project_id) || `${entry.project_id}` :
+            "";
+        return {
+            id: entry.id,
+            description: entry.description || "无描述",
+            projectName,
+            tagNames: entry.tags || [],
+            start: new Date(entry.start),
+            stop: entry.stop ? new Date(entry.stop) : null,
+            durationSeconds: Math.max(0, entry.duration),
+            billable: entry.billable,
+            syncStatus,
+        };
+    }
+
+    private async ensureWorkspaceId(): Promise<number | null> {
+        if (this.config.workspaceId) return this.config.workspaceId;
+
+        const response = await togglApi.getMe();
+        if (!response.ok || !response.data?.default_workspace_id) {
+            showMessage(`获取 Toggl 工作区失败: HTTP ${response.status}`, 4000, "error");
+            return null;
+        }
+
+        this.config.workspaceId = response.data.default_workspace_id;
+        await this.saveConfig();
+        return this.config.workspaceId;
+    }
+
+    private renderProjectOptions(): string {
+        let html = `<option value="">无项目</option>`;
+        this.projects.forEach((name, id) => {
+            html += `<option value="${id}">${this.escapeHtml(name)}</option>`;
+        });
+        return html;
+    }
+
+    private renderTagOptions(): string {
+        return this.tags.map((tag) => `<option value="${this.escapeHtml(tag)}"></option>`).join("");
+    }
+
+    private async refreshProjectSelect(button: HTMLButtonElement, select: HTMLSelectElement): Promise<void> {
+        const previousValue = select.value;
+        const previousText = button.textContent || "刷新";
+        button.disabled = true;
+        button.textContent = "...";
+        try {
+            await this.refreshProjects(true);
+            select.innerHTML = this.renderProjectOptions();
+            if (previousValue) {
+                select.value = previousValue;
+            }
+        } finally {
+            button.disabled = false;
+            button.textContent = previousText;
+        }
+    }
+
+    private async refreshTagDatalist(button: HTMLButtonElement, datalist: HTMLDataListElement): Promise<void> {
+        const previousText = button.textContent || "刷新";
+        button.disabled = true;
+        button.textContent = "...";
+        try {
+            await this.refreshTags(true);
+            datalist.innerHTML = this.renderTagOptions();
+        } finally {
+            button.disabled = false;
+            button.textContent = previousText;
+        }
+    }
+
+    private parseTags(value: string): string[] {
+        const tags = value.split(/[,，]/)
+            .map((tag) => tag.trim())
+            .filter((tag) => tag.length > 0);
+        const unique = new Set<string>();
+        for (const tag of tags) {
+            unique.add(tag);
+        }
+        const result: string[] = [];
+        unique.forEach((tag) => result.push(tag));
+        return result;
+    }
+
+    private toDateTimeInputValue(date: Date): string {
+        return [
+            date.getFullYear(),
+            "-",
+            this.leftPad(date.getMonth() + 1, 2),
+            "-",
+            this.leftPad(date.getDate(), 2),
+            "T",
+            this.leftPad(date.getHours(), 2),
+            ":",
+            this.leftPad(date.getMinutes(), 2),
+        ].join("");
+    }
+
+    private escapeHtml(value: string): string {
+        return value
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+    }
+
+    private normalizeStatusBarText(value: string | undefined): string {
+        return (value || "").trim() || "Toggl";
+    }
+
+    private normalizeInitialDays(value: number): number {
+        if (value === 7 || value === 30 || value === 90) return value;
+        if (value > 0 && value <= 7) return 7;
+        if (value > 7 && value <= 30) return 30;
+        return 90;
+    }
+
+    // 添加时间条目
+    private async addEntries(entries: TimeEntry[], database?: TargetDatabase) {
+        const targetDatabase = database ?? await this.getTargetDatabase();
+        if (!targetDatabase) {
+            return;
+        }
+
+        for (const entry of entries) {
+            const projectName = entry.project_id ?
+                this.projects.get(entry.project_id) || `${entry.project_id}` :
+                "";
+            const tagNames = entry.tags || [];
+
+            const rowId = await this.insertDatabaseRow(targetDatabase.avId);
+            if (!rowId) {
+                console.error("[TogglSync] Failed to insert database row for entry:", entry.id);
+                continue;
+            }
+
+            await this.writeTogglRow(targetDatabase, rowId, {
+                id: entry.id,
+                description: entry.description || "无描述",
+                projectName,
+                tagNames,
+                start: new Date(entry.start),
+                stop: entry.stop ? new Date(entry.stop) : null,
+                durationSeconds: Math.max(0, entry.duration),
+                billable: entry.billable,
+                syncStatus: "正常",
+            });
+        }
+    }
+
+    private async cleanupLocalDeletableRows() {
+        if (!this.config.targetDocId) {
+            showMessage("请先配置目标文档 ID", 4000, "error");
+            return;
+        }
+
+        const database = await this.getTargetDatabase();
+        if (!database) {
+            return;
+        }
+
+        const rows = await this.readLocalDatabaseRows(database);
+        const deletableRows = rows.filter((row) => row.syncStatus === "本地可删除");
+        if (deletableRows.length === 0) {
+            showMessage("没有本地可删除项", 2500, "info");
+            return;
+        }
+
+        const txResult = await this.requestTransaction([{
+            action: "removeAttrViewBlock",
+            avID: database.avId,
+            srcIDs: deletableRows.map((row) => row.rowId),
+            removeDest: true,
+        }]);
+        if (!txResult || txResult.code !== 0) {
+            console.error("[TogglSync] removeAttrViewBlock failed:", JSON.stringify(txResult));
+            showMessage("清理本地可删除项失败，请查看控制台日志", 5000, "error");
+            return;
+        }
+        showMessage(`已清理 ${deletableRows.length} 条本地可删除项`, 3000, "info");
+    }
+
+    private async getRenderedRowIds(avId: string): Promise<string[]> {
+        const result = await this.renderDatabase(avId);
+        if (result.code !== 0) return [];
+        return this.extractRenderedRowIds(result.data);
+    }
+
+    private async renderDatabase(avId: string): Promise<any> {
+        return fetchSyncPost("/api/av/renderAttributeView", {
+            id: avId,
+            viewID: "",
+            query: "",
+            page: 1,
+            pageSize: -1,
+        });
+    }
+
+    private extractRows(data: any): any[] {
+        if (Array.isArray(data?.rows)) return data.rows;
+        if (Array.isArray(data?.view?.rows)) return data.view.rows;
+        if (Array.isArray(data?.attributeView?.rows)) return data.attributeView.rows;
+        return [];
+    }
+
+    private extractRenderedRowIds(data: any): string[] {
+        return this.extractRows(data).map((row) => row?.key?.id ?? row?.id ?? row?.blockID).filter(Boolean);
+    }
+
+    private hasActiveViewFilterOrGroup(data: any): boolean {
+        return this.extractViews(data).some((view) => this.viewHasActiveFilterOrGroup(view));
+    }
+
+    private extractViews(data: any): any[] {
+        const viewArrays = [
+            data?.views,
+            data?.av?.views,
+            data?.attributeView?.views,
+        ].filter(Array.isArray);
+        if (viewArrays.length > 0) {
+            return viewArrays.flat();
+        }
+
+        return [
+            data?.view,
+            data?.av?.view,
+            data?.attributeView?.view,
+            data,
+        ].filter((view) => view && typeof view === "object");
+    }
+
+    private viewHasActiveFilterOrGroup(view: any): boolean {
+        if (this.objectHasDirectActiveFilterOrGroup(view)) return true;
+        return [view?.table, view?.gallery, view?.board, view?.calendar].some((item) =>
+            this.objectHasDirectActiveFilterOrGroup(item)
+        );
+    }
+
+    private objectHasDirectActiveFilterOrGroup(value: any): boolean {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+        return Object.entries(value).some(([key, item]) => {
+            const normalizedKey = key.toLowerCase();
+            if (!normalizedKey.includes("filter") && !normalizedKey.includes("group")) return false;
+            return this.hasMeaningfulViewSetting(item);
+        });
+    }
+
+    private hasMeaningfulViewSetting(value: any): boolean {
+        if (value === null || value === undefined) return false;
+        if (Array.isArray(value)) return value.length > 0;
+        if (typeof value === "boolean") return value;
+        if (typeof value === "number") return value !== 0;
+        if (typeof value === "string") return value.trim().length > 0 && value !== "0";
+        if (typeof value === "object") return Object.keys(value).length > 0;
+        return false;
+    }
+
+    private normalizeAttributeViewKeys(data: any): AttributeViewKey[] {
+        const candidates = [
+            data,
+            data?.keys,
+            data?.keyValues,
+            data?.av?.keyValues,
+            data?.attributeView?.keyValues,
+            data?.view?.columns,
+            data?.columns,
+        ];
+        const keys = candidates.find((item) => Array.isArray(item)) ?? [];
+        return keys
+            .map((key: any) => ({
+                id: key.id ?? key.keyID,
+                name: key.name ?? key.keyName ?? key.title,
+                type: key.type ?? key.valueType ?? "text",
+                options: key.options,
+            }))
+            .filter((key: AttributeViewKey) => key.id && key.name);
+    }
+
+    private extractAvId(block: any): string | null {
+        const avId = block?.AttributeViewID ?? block?.attributeViewID ?? block?.avID ?? block?.avId;
+        if (avId) return String(avId);
+        const markdown = block?.markdown ?? block?.content ?? block?.data ?? "";
+        return this.extractAvIdsFromText(markdown)[0] ?? null;
+    }
+
+    private extractAvIdsFromText(text: string): string[] {
+        return [...String(text || "").matchAll(/data-av-id=["']([^"']+)["']/g)]
+            .map((match) => match[1])
+            .filter(Boolean);
+    }
+
+    private extractAvIdFromBlockApiResponse(result: any): string | null {
+        const operations = Array.isArray(result?.data) ?
+            result.data.flatMap((item: any) => item?.doOperations ?? []) :
+            [];
+        for (const operation of operations) {
+            const avId = this.extractAvId(operation) ?? this.extractAvId({markdown: operation?.data});
+            if (avId) return avId;
+        }
+        return null;
+    }
+
+    private findKey(keys: AttributeViewKey[], aliases: string[]): AttributeViewKey | null {
+        const normalizedAliases = aliases.map((alias) => this.normalizeKeyName(alias));
+        return keys.find((key) => normalizedAliases.indexOf(this.normalizeKeyName(key.name)) !== -1) ?? null;
+    }
+
+    private findPrimaryTextKey(keys: AttributeViewKey[]): AttributeViewKey | null {
+        return keys.find((key) => key.type === "block") ?? keys.find((key) => key.type === "text") ?? null;
+    }
+
+    private buildCellValue(key: AttributeViewKey, rowId: string, input: DatabaseCellInput | string[]): any | null {
+        const value: any = {
+            id: this.createSiyuanId(),
+            keyID: key.id,
+            blockID: rowId,
+            type: key.type,
+        };
+
+        if (key.type === "number") {
+            const number = Number(input);
+            if (!Number.isFinite(number)) return null;
+            value.number = {content: number, isNotEmpty: true};
+        } else if (key.type === "date" || key.type === "created" || key.type === "updated") {
+            const date = input instanceof Date ? input : new Date(String(input));
+            if (!Number.isFinite(date.getTime())) return null;
+            value[key.type] = {content: date.getTime(), isNotEmpty: true, isNotTime: false};
+        } else if (key.type === "checkbox") {
+            value.checkbox = {checked: Boolean(input)};
+        } else if (key.type === "mSelect" || key.type === "select") {
+            const values = Array.isArray(input) ? input : [String(input)];
+            if (key.type === "select") {
+                value.mSelect = values.filter(Boolean).slice(0, 1).map((content) => ({content, color: ""}));
+            } else {
+                value.mSelect = values.filter(Boolean).map((content) => ({content, color: ""}));
+            }
+        } else if (key.type === "block") {
+            value.block = {content: String(input)};
+        } else if (["url", "email", "phone", "template"].indexOf(key.type) !== -1) {
+            value[key.type] = {content: String(input)};
+        } else {
+            value.type = "text";
+            value.text = {content: Array.isArray(input) ? input.join(", ") : String(input)};
+        }
+
+        return value;
+    }
+
+    private async readLocalDatabaseRows(database: TargetDatabase): Promise<LocalDatabaseRow[]> {
+        const result = await this.renderDatabase(database.avId);
+        if (result.code !== 0) return [];
+
+        const rowIds = this.getDatabaseRowIds(result.data);
+        const rowsById = new Map<string, LocalDatabaseRow>();
+        for (const rowId of rowIds) {
+            rowsById.set(rowId, {
+                rowId,
+                togglId: null,
+                syncStatus: "",
+                description: "",
+                projectName: "",
+                tagNames: [],
+                start: null,
+                stop: null,
+                durationSeconds: 0,
+                billable: false,
+            });
+        }
+
+        const applyCell = (rowId: string, keyId: string, raw: any) => {
+            let row = rowsById.get(rowId);
+            if (!row) {
+                row = {
+                    rowId,
+                    togglId: null,
+                    syncStatus: "",
+                    description: "",
+                    projectName: "",
+                    tagNames: [],
+                    start: null,
+                    stop: null,
+                    durationSeconds: 0,
+                    billable: false,
+                };
+                rowsById.set(rowId, row);
+            }
+
+            const key = database.keys.find((item) => item.id === keyId);
+            if (!key) return;
+            if (this.findKey([{...key, name: key.name}], ["TogglID", "Toggl ID", "Toggl Id", "toggl-id"])) {
+                const id = this.cellToNumber(raw);
+                row.togglId = Number.isFinite(id) && id > 0 ? id : null;
+            } else if (
+                this.findKey([{...key, name: key.name}], [
+                    "描述",
+                    "Description",
+                    "标题",
+                    "Title",
+                    "名称",
+                    "Name",
+                    "任务",
+                    "事项",
+                ])
+            ) {
+                row.description = this.cellToText(raw);
+            } else if (this.findKey([{...key, name: key.name}], ["项目", "Project"])) {
+                row.projectName = this.cellToText(raw);
+            } else if (this.findKey([{...key, name: key.name}], ["标签", "Tags", "Tag"])) {
+                row.tagNames = this.cellToStringArray(raw);
+            } else if (this.findKey([{...key, name: key.name}], ["开始", "开始时间", "Start", "Start Time"])) {
+                row.start = this.cellToDate(raw);
+            } else if (
+                this.findKey([{...key, name: key.name}], ["结束", "结束时间", "End", "End Time", "Stop", "Stop Time"])
+            ) {
+                row.stop = this.cellToDate(raw);
+            } else if (this.findKey([{...key, name: key.name}], ["时长", "Duration"])) {
+                const duration = this.cellToNumber(raw);
+                row.durationSeconds = Number.isFinite(duration) ? Math.max(0, Math.round(duration)) : 0;
+            } else if (this.findKey([{...key, name: key.name}], ["计费", "可计费", "Billable"])) {
+                row.billable = this.cellToBoolean(raw);
+            } else if (this.findKey([{...key, name: key.name}], ["同步状态", "Sync Status"])) {
+                row.syncStatus = this.normalizeSyncStatus(this.cellToText(raw));
+            }
+        };
+
+        for (const keyValue of this.extractKeyValues(result.data)) {
+            const keyId = keyValue?.key?.id ?? keyValue?.id ?? keyValue?.keyID;
+            const values = keyValue?.values;
+            if (!keyId || !Array.isArray(values)) continue;
+            for (const value of values) {
+                const rowId = value?.blockID ?? value?.value?.blockID;
+                if (rowId) applyCell(rowId, keyId, value?.value ?? value);
+            }
+        }
+
+        for (const row of this.extractRows(result.data)) {
+            const rowId = row?.key?.id ?? row?.id ?? row?.blockID;
+            if (!rowId) continue;
+            const cells = row?.cells ?? row?.values ?? [];
+            for (const cell of cells) {
+                const raw = cell?.value ?? cell;
+                const keyId = cell?.keyID ?? raw?.keyID;
+                if (keyId) applyCell(rowId, keyId, raw);
+            }
+        }
+
+        const rows = Array.from(rowsById.values());
+        for (const row of rows) {
+            if (!row.syncStatus) {
+                row.syncStatus = row.togglId ? "正常" : "未同步";
+                if (!row.togglId && (row.description || row.start)) {
+                    await this.writeSyncStatus(database, row.rowId, "未同步");
+                }
+            }
+        }
+        return rows;
+    }
+
+    private isMeaningfulLocalRow(row: LocalDatabaseRow): boolean {
+        return Boolean(
+            row.description || row.projectName || row.tagNames.length > 0 || row.start || row.stop ||
+                row.durationSeconds > 0,
+        );
+    }
+
+    private getDatabaseRowIds(data: any): string[] {
+        const ids = new Set<string>();
+        for (const id of data?.view?.itemIds ?? data?.itemIds ?? data?.attributeView?.itemIds ?? []) {
+            if (id) ids.add(id);
+        }
+        for (const view of data?.views ?? data?.attributeView?.views ?? []) {
+            for (const id of view?.itemIds ?? []) {
+                if (id) ids.add(id);
+            }
+        }
+        for (const row of this.extractRows(data)) {
+            const id = row?.key?.id ?? row?.id ?? row?.blockID;
+            if (id) ids.add(id);
+        }
+        for (const keyValue of this.extractKeyValues(data)) {
+            for (const value of keyValue?.values ?? []) {
+                const id = value?.blockID ?? value?.value?.blockID;
+                if (id) ids.add(id);
+            }
+        }
+        return Array.from(ids);
+    }
+
+    private extractKeyValues(data: any): any[] {
+        const candidates = [
+            data?.keyValues,
+            data?.av?.keyValues,
+            data?.attributeView?.keyValues,
+            data?.view?.keyValues,
+        ];
+        return candidates.find((item) => Array.isArray(item)) ?? [];
+    }
+
+    private normalizeSyncStatus(value: string): SyncStatus | "" {
+        const normalized = value.trim();
+        return (SYNC_STATUS_OPTIONS as string[]).indexOf(normalized) !== -1 ? normalized as SyncStatus : "";
+    }
+
+    private cellToText(raw: any): string {
+        const value = raw?.value ?? raw;
+        return String(
+            value?.text?.content ??
+                value?.block?.content ??
+                value?.url?.content ??
+                value?.phone?.content ??
+                value?.email?.content ??
+                value?.template?.content ??
+                value?.mSelect?.[0]?.content ??
+                value?.number?.content ??
+                "",
+        ).trim();
+    }
+
+    private cellToStringArray(raw: any): string[] {
+        const value = raw?.value ?? raw;
+        if (Array.isArray(value?.mSelect)) {
+            return value.mSelect.map((item: any) => String(item?.content ?? "").trim()).filter(Boolean);
+        }
+        return this.parseTags(this.cellToText(value));
+    }
+
+    private cellToNumber(raw: any): number {
+        const value = raw?.value ?? raw;
+        const number = Number(value?.number?.content ?? this.cellToText(value));
+        return Number.isFinite(number) ? number : NaN;
+    }
+
+    private cellToBoolean(raw: any): boolean {
+        const value = raw?.value ?? raw;
+        return Boolean(value?.checkbox?.checked);
+    }
+
+    private cellToDate(raw: any): Date | null {
+        const value = raw?.value ?? raw;
+        const content = value?.date?.content ?? value?.created?.content ?? value?.updated?.content;
+        if (Number.isFinite(content)) {
+            const date = new Date(content);
+            return Number.isFinite(date.getTime()) ? date : null;
+        }
+        const text = this.cellToText(value);
+        if (!text) return null;
+        const date = new Date(text);
+        return Number.isFinite(date.getTime()) ? date : null;
+    }
+
+    private isEmptyCellInput(input: DatabaseCellInput | string[]): boolean {
+        return input === null || input === undefined || (typeof input === "string" && input.length === 0) ||
+            (Array.isArray(input) && input.length === 0);
+    }
+
+    private async requestTransaction(doOperations: any[]): Promise<any> {
+        const wsUrl = window.siyuan.ws.ws.url;
+        const parsed = new URL(wsUrl);
+        const params = new URLSearchParams(parsed.search);
+        return fetchSyncPost("/api/transactions", {
+            session: params.get("id"),
+            app: params.get("app"),
+            transactions: [{doOperations, undoOperations: []}],
+            reqId: Date.now(),
+        });
+    }
+
+    private sleep(ms: number): Promise<void> {
+        return new Promise((resolve) => window.setTimeout(resolve, ms));
+    }
+
+    private createSiyuanId(): string {
+        const now = new Date();
+        const timestamp = [
+            now.getFullYear(),
+            this.leftPad(now.getMonth() + 1, 2),
+            this.leftPad(now.getDate(), 2),
+            this.leftPad(now.getHours(), 2),
+            this.leftPad(now.getMinutes(), 2),
+            this.leftPad(now.getSeconds(), 2),
+        ].join("");
+        const random = String(Math.floor(Math.random() * 10000000)).padStart(7, "0");
+        return `${timestamp}-${random}`;
+    }
+
+    private normalizeKeyName(name: string): string {
+        return name.replace(/[\s_-]+/g, "").toLowerCase();
+    }
+
+    private escapeSql(value: string): string {
+        return value.replace(/'/g, "''");
+    }
+
+    private formatUnknownError(error: unknown): string {
+        if (error instanceof Error && error.message) return error.message;
+        if (typeof error === "string") return error;
+        try {
+            return JSON.stringify(error);
+        } catch {
+            return "未知错误";
+        }
+    }
+
+    private leftPad(value: number, length: number): string {
+        let result = String(value);
+        while (result.length < length) result = `0${result}`;
+        return result;
+    }
+
+    private rightPad(value: string, length: number): string {
+        let result = value;
+        while (result.length < length) result = `${result}0`;
+        return result;
+    }
+
+    private formatDuration(seconds: number): string {
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = seconds % 60;
+        return `${h}:${this.leftPad(m, 2)}:${this.leftPad(s, 2)}`;
+    }
+
+    private async sql(stmt: string): Promise<any[]> {
+        const result = await fetchSyncPost("/api/query/sql", {stmt});
+        return result.code === 0 ? result.data : [];
+    }
+
+    // ==================== 状态栏计时器 ====================
+
+    private lastEntryStart = "";
+    private lastEntryDescription = "";
+
+    private async startStatusBarTimer(refreshRemote = false) {
+        this.stopStatusBarTimer();
+        if (!this.statusBarEl) {
+            this.statusBarEl = document.createElement("div");
+            this.statusBarEl.className = "toggl-sync__status-bar";
+            this.statusBarEl.title = "Toggl Sync";
+            this.statusBarEl.addEventListener("click", (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                this.showSyncMenu({x: event.clientX, y: event.clientY});
+            });
+            this.addStatusBar({element: this.statusBarEl});
+        }
+        this.renderIdleState();
+        if (this.config.currentTimer) {
+            this.applyCurrentTimerState(this.config.currentTimer);
+        } else {
+            await this.clearCurrentTimer(false);
+        }
+        this.timerInterval = setInterval(() => {
+            if (this.lastEntryStart) {
+                const elapsed = Math.floor((Date.now() - new Date(this.lastEntryStart).getTime()) / 1000);
+                this.renderTimer(elapsed);
+            }
+        }, 1000);
+        if (refreshRemote) {
+            await this.refreshCurrentTimer(true);
+        }
+    }
+
+    private stopStatusBarTimer() {
+        if (this.timerInterval) {
+            clearInterval(this.timerInterval);
+            this.timerInterval = null;
+        }
+    }
+
+    private async toggleStatusBarTimer() {
+        const nextEnabled = !this.config.statusBarTimer;
+        if (nextEnabled) {
+            if (!this.config.token) {
+                showMessage("请先配置 Toggl API Token", 4000, "error");
+                return;
+            }
+            this.config.statusBarTimer = true;
+            await this.saveConfig();
+            await this.startStatusBarTimer(true);
+            showMessage("状态栏计时器已开启", 2000, "info");
+        } else {
+            this.config.statusBarTimer = false;
+            await this.saveConfig();
+            this.stopStatusBarTimer();
+            this.renderIdleState();
+            showMessage("状态栏计时器已关闭", 2000, "info");
+        }
+    }
+
+    private renderTimer(elapsed: number) {
+        if (!this.statusBarEl) return;
+        const h = Math.floor(elapsed / 3600);
+        const m = Math.floor((elapsed % 3600) / 60);
+        const s = elapsed % 60;
+        const time = `${h}:${this.leftPad(m, 2)}:${this.leftPad(s, 2)}`;
+        const desc = this.escapeHtml(this.lastEntryDescription || "...");
+        this.statusBarEl.innerHTML =
+            `<span class="toggl-sync__status-bar-dot toggl-sync__status-bar-dot--running"></span>` +
+            `<span class="toggl-sync__status-bar-desc" title="${desc}">${desc}</span>` +
+            `<span class="toggl-sync__status-bar-time">${time}</span>`;
+    }
+
+    private renderIdleState() {
+        if (!this.statusBarEl) return;
+        const text = this.escapeHtml(this.normalizeStatusBarText(this.config.statusBarText));
+        this.statusBarEl.innerHTML = `<span class="toggl-sync__status-bar-dot"></span>` +
+            `<span class="toggl-sync__status-bar-time">${text}</span>`;
+    }
+
+    private async updateCurrentTimerFromEntry(entry: TimeEntry) {
+        this.lastEntryId = entry.id;
+        this.lastEntryDescription = entry.description || "";
+        this.lastEntryStart = entry.start;
+        this.config.currentTimer = {
+            id: entry.id,
+            workspaceId: entry.workspace_id,
+            description: entry.description || "",
+            start: entry.start,
+        };
+        if (!this.config.workspaceId && entry.workspace_id) {
+            this.config.workspaceId = entry.workspace_id;
+        }
+        await this.saveConfig();
+        if (this.statusBarEl) {
+            const elapsed = Math.floor((Date.now() - new Date(entry.start).getTime()) / 1000);
+            this.renderTimer(Math.max(0, elapsed));
+        }
+    }
+
+    private async clearCurrentTimer(save = true) {
+        this.lastEntryId = null;
+        this.lastEntryStart = "";
+        this.lastEntryDescription = "";
+        this.config.currentTimer = null;
+        this.renderIdleState();
+        if (save) {
+            await this.saveConfig();
+        }
+    }
+
+    private loadCurrentTimerState() {
+        if (!this.config.currentTimer) return;
+        this.applyCurrentTimerState(this.config.currentTimer);
+    }
+
+    private applyCurrentTimerState(timer: CurrentTimerState) {
+        this.lastEntryId = timer.id;
+        this.lastEntryDescription = timer.description || "";
+        this.lastEntryStart = timer.start;
+        if (this.statusBarEl) {
+            const elapsed = Math.floor((Date.now() - new Date(timer.start).getTime()) / 1000);
+            this.renderTimer(Math.max(0, elapsed));
+        }
+    }
+
+    private async refreshCurrentTimer(silent = false) {
+        if (!this.config.token) {
+            if (!silent) showMessage("请先配置 Toggl API Token", 4000, "error");
+            return;
+        }
+        const res = await togglApi.getCurrentTimeEntry();
+        if (res.ok && res.data) {
+            await this.updateCurrentTimerFromEntry(res.data);
+            if (!silent) showMessage(`已刷新当前 Toggl 计时${this.formatQuotaText(res)}`, 3000, "info");
+        } else if (res.ok) {
+            await this.clearCurrentTimer();
+            if (!silent) showMessage(`当前没有正在运行的 Toggl 计时${this.formatQuotaText(res)}`, 3000, "info");
+        } else {
+            if (!silent) showMessage(this.formatApiError("刷新当前 Toggl 计时失败", res), 5000, "error");
+        }
+    }
+
+    private setupAutoSync() {
+        this.stopAutoSync();
+        if (!this.config.token || !this.config.targetDocId || this.config.autoSyncMinutes <= 0) return;
+        this.autoSyncInterval = setInterval(() => {
+            void this.syncEntries("auto");
+        }, this.config.autoSyncMinutes * 60 * 1000);
+    }
+
+    private stopAutoSync() {
+        if (this.autoSyncInterval) {
+            clearInterval(this.autoSyncInterval);
+            this.autoSyncInterval = null;
+        }
+    }
+
+    private formatQuotaText(response: {quotaRemaining?: number; quotaResetsIn?: number;}): string {
+        if (response.quotaRemaining === undefined) return "";
+        const resetText = response.quotaResetsIn !== undefined ? `，${response.quotaResetsIn} 秒后重置` : "";
+        return `（剩余 ${response.quotaRemaining}${resetText}）`;
+    }
+
+    private formatApiError(
+        prefix: string,
+        response: {status: number; quotaRemaining?: number; quotaResetsIn?: number; error?: string;},
+    ): string {
+        if (response.status === 402) {
+            return `${prefix}: Toggl API 额度已用完${this.formatQuotaText(response)}`;
+        }
+        if (response.status === 429) {
+            return `${prefix}: 请求过快，请稍后再试${this.formatQuotaText(response)}`;
+        }
+        if (response.error) {
+            return `${prefix}: HTTP ${response.status} ${response.error}`;
+        }
+        return `${prefix}: HTTP ${response.status}`;
     }
 }
