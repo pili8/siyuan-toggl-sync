@@ -69,10 +69,15 @@
     }
 
     &-section-title {
-      font-size: 14px;
-      font-weight: 600;
+      font-size: 13px;
+      font-weight: 700;
       color: var(--b3-theme-on-surface);
-      margin-bottom: 12px;
+      margin-bottom: 14px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--b3-border-color);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      opacity: 0.85;
     }
 
     &-grid {

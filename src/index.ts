@@ -2,6 +2,7 @@ import {
     Plugin,
     showMessage,
     Dialog,
+    confirm,
     Menu,
     fetchSyncPost,
 } from "siyuan";
@@ -81,7 +82,7 @@ type TogglDatabaseRow = {
     syncStatus?: SyncStatus;
 };
 
-type SyncStatus = "正常" | "未同步" | "本地待上传" | "Toggl 待更新" | "Toggl 待删除" | "本地可删除" | "失败";
+type SyncStatus = "正常" | "未同步" | "本地待上传" | "本地可删除" | "Toggl 待更新" | "Toggl 待删除" | "失败";
 
 type SyncMode = "regular" | "repair" | "auto";
 
@@ -116,24 +117,24 @@ const SYNC_STATUS_OPTIONS: SyncStatus[] = [
     "正常",
     "未同步",
     "本地待上传",
+    "本地可删除",
     "Toggl 待更新",
     "Toggl 待删除",
-    "本地可删除",
     "失败",
 ];
 
 const TOGGL_DATABASE_FIELDS: DatabaseFieldDefinition[] = [
     {name: "描述", type: "text", aliases: ["描述", "Description", "标题", "Title", "名称", "Name", "任务", "事项"]},
-    {name: "TogglID", type: "number", aliases: ["TogglID", "Toggl ID", "Toggl Id", "toggl-id"]},
+    {name: "持续时间", type: "text", aliases: ["时长显示", "持续时间", "Duration Text", "Duration Display"]},
     {name: "项目", type: "text", aliases: ["项目", "Project"]},
     {name: "标签", type: "mSelect", aliases: ["标签", "Tags", "Tag"]},
+    {name: "同步状态", type: "select", aliases: ["同步状态", "Sync Status"]},
     {name: "开始", type: "date", aliases: ["开始", "开始时间", "Start", "Start Time"]},
     {name: "结束", type: "date", aliases: ["结束", "结束时间", "End", "End Time", "Stop", "Stop Time"]},
-    {name: "日期", type: "date", aliases: ["日期", "Date"]},
-    {name: "时长", type: "number", aliases: ["时长", "Duration"]},
-    {name: "时长显示", type: "text", aliases: ["时长显示", "持续时间", "Duration Text", "Duration Display"]},
     {name: "计费", type: "checkbox", aliases: ["计费", "可计费", "Billable"]},
-    {name: "同步状态", type: "select", aliases: ["同步状态", "Sync Status"]},
+    {name: "时长", type: "number", aliases: ["时长", "Duration"]},
+    {name: "TogglID", type: "number", aliases: ["TogglID", "Toggl ID", "Toggl Id", "toggl-id"]},
+    {name: "日期", type: "date", aliases: ["日期", "创建日期", "Date"]},
 ];
 
 type PendingOp =
@@ -340,7 +341,7 @@ export default class TogglSyncPlugin extends Plugin {
                 this.config.initialDays === 90 ? "selected" : ""
             }>${this.i18n.days90}</option>
                             </select>
-                            <div class="toggl-sync__settings-desc">最多 90 天。</div>
+                            <div class="toggl-sync__settings-desc">受 API 限制，最多 90 天。</div>
                         </div>
                         <div class="toggl-sync__settings-field">
                             <label class="toggl-sync__settings-label">自动同步周期</label>
@@ -1241,7 +1242,7 @@ export default class TogglSyncPlugin extends Plugin {
             {aliases: ["标签", "Tags", "Tag"], value: row.tagNames},
             {aliases: ["开始", "开始时间", "Start", "Start Time"], value: row.start},
             {aliases: ["结束", "结束时间", "End", "End Time", "Stop", "Stop Time"], value: row.stop},
-            {aliases: ["日期", "Date"], value: row.start},
+            {aliases: ["日期", "创建日期", "Date"], value: row.start},
             {aliases: ["时长", "Duration"], value: row.durationSeconds},
             {
                 aliases: ["时长显示", "持续时间", "Duration Text", "Duration Display"],
@@ -1838,6 +1839,16 @@ export default class TogglSyncPlugin extends Plugin {
             showMessage("没有本地可删除项", 2500, "info");
             return;
         }
+
+        const confirmOk = await new Promise<boolean>((resolve) => {
+            confirm(
+                `确定清理 ${deletableRows.length} 条本地可删除项？此操作不可撤销。`,
+                "清理本地可删除项",
+                () => resolve(true),
+                () => resolve(false),
+            );
+        });
+        if (!confirmOk) return;
 
         const txResult = await this.requestTransaction([{
             action: "removeAttrViewBlock",
