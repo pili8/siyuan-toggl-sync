@@ -10,7 +10,7 @@
     "dev": "webpack --config webpack.config.js --mode development",
     "build": "webpack --config webpack.config.js --mode production",
     "deploy": "npm run build",
-    "deploy:vault": "npm run build && ditto dist /Users/gm/SiYuan_Vault/data/plugins/siyuan-toggl-sync"
+    "deploy:vault": "npm run build && ditto dist /path/to/siyuan/data/plugins/siyuan-toggl-sync"
   },
   "keywords": [],
   "author": "Vanessa",
