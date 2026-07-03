@@ -24,8 +24,36 @@ export function setToken(token: string) {
     authToken = token;
 }
 
+// btoa polyfill for SiYuan kernel goja engine (no Web API)
+function base64Encode(str: string): string {
+    if (typeof btoa !== "undefined") return btoa(str);
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const bytes: number[] = [];
+    for (let i = 0; i < str.length; i++) {
+        const code = str.charCodeAt(i);
+        if (code < 0x80) {
+            bytes.push(code);
+        } else if (code < 0x800) {
+            bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+        } else {
+            bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+        }
+    }
+    let result = "";
+    for (let i = 0; i < bytes.length; i += 3) {
+        const b1 = bytes[i];
+        const b2 = i + 1 < bytes.length ? bytes[i + 1] : NaN;
+        const b3 = i + 2 < bytes.length ? bytes[i + 2] : NaN;
+        result += chars[b1 >> 2];
+        result += chars[((b1 & 0x03) << 4) | (isNaN(b2) ? 0 : (b2 >> 4))];
+        result += isNaN(b2) ? "=" : chars[((b2 & 0x0f) << 2) | (isNaN(b3) ? 0 : (b3 >> 6))];
+        result += isNaN(b3) ? "=" : chars[b3 & 0x3f];
+    }
+    return result;
+}
+
 function authHeader(): string {
-    return `Basic ${btoa(authToken + ":api_token")}`;
+    return `Basic ${base64Encode(authToken + ":api_token")}`;
 }
 
 async function request<T>(url: string, method: string = "GET", body?: any): Promise<ApiResponse<T>> {

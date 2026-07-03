@@ -688,6 +688,28 @@ export default class TogglSyncPlugin extends Plugin {
         });
     }
 
+    private async autoStopRunningTimer(workspaceId: number): Promise<void> {
+        try {
+            const current = await togglApi.getCurrentTimeEntry();
+            const runningEntry: any = current.ok ? current.data : null;
+            if (!runningEntry) return;
+
+            const entryId = runningEntry.id as number;
+            // 如果是同一个计时器已通过本地 track，则不重复停止
+            if (this.lastEntryId === entryId) return;
+
+            const stopResult = await togglApi.stopTimeEntry(workspaceId, entryId);
+            if (stopResult.ok && this.config.targetDocId) {
+                await this.addEntries([stopResult.data]);
+            }
+            await this.clearCurrentTimer();
+            console.log(`[TogglSync] auto-stopped running timer #${entryId} before starting new`);
+        } catch (error) {
+            // API 暂不可用时跳过（serve 模式下可能 fetch 失败）
+            console.warn("[TogglSync] autoStopRunningTimer failed, continuing:", error);
+        }
+    }
+
     private async startTogglTimer(input: {
         description: string;
         projectId?: number;
@@ -696,6 +718,9 @@ export default class TogglSyncPlugin extends Plugin {
     }): Promise<boolean> {
         const workspaceId = await this.ensureWorkspaceId();
         if (!workspaceId) return false;
+
+        // 启动新计时前，先停止当前正在运行的计时器（避免多个计时器并发运行）
+        await this.autoStopRunningTimer(workspaceId);
 
         const start = new Date();
         const response = await togglApi.createTimeEntry(workspaceId, {
