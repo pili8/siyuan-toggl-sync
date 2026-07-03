@@ -1119,7 +1119,8 @@ export default class TogglSyncPlugin extends Plugin {
         }
 
         const refreshedKeys = await this.loadDatabaseKeys(avId);
-        return this.mergeDatabaseKeys(refreshedKeys, keys);
+        const merged = this.mergeDatabaseKeys(refreshedKeys, keys);
+        return this.sortKeysByFieldOrder(merged);
     }
 
     private async ensureSyncStatusOptions(database: TargetDatabase): Promise<void> {
@@ -1178,6 +1179,21 @@ export default class TogglSyncPlugin extends Plugin {
         return merged;
     }
 
+    private sortKeysByFieldOrder(keys: AttributeViewKey[]): AttributeViewKey[] {
+        const orderMap = new Map<string, number>();
+        TOGGL_DATABASE_FIELDS.forEach((field, index) => {
+            orderMap.set(this.normalizeKeyName(field.name), index);
+        });
+        return [...keys].sort((a, b) => {
+            const ai = orderMap.get(this.normalizeKeyName(a.name));
+            const bi = orderMap.get(this.normalizeKeyName(b.name));
+            if (ai !== undefined && bi !== undefined) return ai - bi;
+            if (ai !== undefined) return -1;
+            if (bi !== undefined) return 1;
+            return 0;
+        });
+    }
+
     private async findDatabaseAvIdInDocument(docId: string, expectedAvId?: string): Promise<string | null> {
         const kramdown = await this.getBlockKramdown(docId);
         for (const avId of this.extractAvIdsFromText(kramdown)) {
@@ -1215,10 +1231,8 @@ export default class TogglSyncPlugin extends Plugin {
             action: "insertAttrViewBlock",
             avID: avId,
             srcs: [{id: srcId, isDetached: true}],
+            ignoreFillFilter: true,
         };
-        if (beforeResult.code === 0 && this.hasActiveViewFilterOrGroup(beforeResult.data)) {
-            operation.ignoreFillFilter = true;
-        }
         const txResult = await this.requestTransaction([operation]);
 
         if (!txResult || txResult.code !== 0) {
@@ -1264,7 +1278,6 @@ export default class TogglSyncPlugin extends Plugin {
             const result = await fetchSyncPost("/api/av/setAttributeViewBlockAttr", {
                 avID: database.avId,
                 keyID: key.id,
-                rowID: rowId,
                 itemID: rowId,
                 value,
             });
@@ -1284,7 +1297,6 @@ export default class TogglSyncPlugin extends Plugin {
         const result = await fetchSyncPost("/api/av/setAttributeViewBlockAttr", {
             avID: database.avId,
             keyID: key.id,
-            rowID: rowId,
             itemID: rowId,
             value,
         });
@@ -1924,8 +1936,12 @@ export default class TogglSyncPlugin extends Plugin {
         if (!value || typeof value !== "object" || Array.isArray(value)) return false;
         return Object.entries(value).some(([key, item]) => {
             const normalizedKey = key.toLowerCase();
-            if (!normalizedKey.includes("filter") && !normalizedKey.includes("group")) return false;
-            return this.hasMeaningfulViewSetting(item);
+            if (normalizedKey.includes("filter") || normalizedKey.includes("group")) return this.hasMeaningfulViewSetting(item);
+            // 递归检测深层对象（3.7.0 组合筛选可能嵌套在 conditions/criteria 中）
+            if (typeof item === "object" && !Array.isArray(item) && this.objectHasDirectActiveFilterOrGroup(item)) {
+                return true;
+            }
+            return false;
         });
     }
 
@@ -1934,8 +1950,14 @@ export default class TogglSyncPlugin extends Plugin {
         if (Array.isArray(value)) return value.length > 0;
         if (typeof value === "boolean") return value;
         if (typeof value === "number") return value !== 0;
-        if (typeof value === "string") return value.trim().length > 0 && value !== "0";
-        if (typeof value === "object") return Object.keys(value).length > 0;
+        if (typeof value === "string") return value.trim().length > 0 && value !== "0" && value !== "false";
+        if (typeof value === "object") {
+            // 3.7.0 组合筛选可能包含 conditions/items/columns 等嵌套结构
+            if (Array.isArray(value.conditions)) return value.conditions.length > 0;
+            if (Array.isArray(value.items)) return value.items.length > 0;
+            if (Array.isArray(value.columns)) return value.columns.length > 0;
+            return Object.keys(value).length > 0;
+        }
         return false;
     }
 
