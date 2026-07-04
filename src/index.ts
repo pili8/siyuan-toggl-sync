@@ -128,7 +128,7 @@ const TOGGL_DATABASE_FIELDS: DatabaseFieldDefinition[] = [
     {name: "持续时间", type: "text", aliases: ["持续时间", "Duration Display", "Duration Text", "时长显示"]},
     {name: "项目", type: "select", aliases: ["项目", "Project"]},
     {name: "标签", type: "mSelect", aliases: ["标签", "Tags", "Tag"]},
-    {name: "同步状态", type: "select", aliases: ["同步状态", "Sync Status"]},
+    {name: "同步状态", type: "mSelect", aliases: ["同步状态", "Sync Status"]},
     {name: "开始", type: "date", aliases: ["开始", "开始时间", "Start", "Start Time"]},
     {name: "结束", type: "date", aliases: ["结束", "结束时间", "End", "End Time", "Stop", "Stop Time"]},
     {name: "计费", type: "checkbox", aliases: ["计费", "可计费", "Billable"]},
@@ -408,7 +408,7 @@ export default class TogglSyncPlugin extends Plugin {
                 </div>
             </div>
             <div class="b3-dialog__action toggl-sync__settings-footer">
-                <span class="toggl-sync__settings-version">v${"0.1.12"}</span>
+                <span class="toggl-sync__settings-version">v${"0.1.13"}</span>
                 <button class="b3-button b3-button--cancel" id="ts-cancel">${this.i18n.cancel || "取消"}</button>
                 <div class="fn__space"></div>
                 <button class="b3-button b3-button--text" id="ts-save">${this.i18n.save || "保存"}</button>
