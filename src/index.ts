@@ -124,8 +124,8 @@ const SYNC_STATUS_OPTIONS: SyncStatus[] = [
 ];
 
 const TOGGL_DATABASE_FIELDS: DatabaseFieldDefinition[] = [
-    {name: "描述", type: "text", aliases: ["描述", "Description", "标题", "Title", "名称", "Name", "任务", "事项"]},
-    {name: "持续时间", type: "text", aliases: ["时长显示", "持续时间", "Duration Text", "Duration Display"]},
+    {name: "描述", type: "text", aliases: ["描述", "Description"]},
+    {name: "持续时间", type: "text", aliases: ["持续时间", "Duration Display", "Duration Text", "时长显示"]},
     {name: "项目", type: "select", aliases: ["项目", "Project"]},
     {name: "标签", type: "mSelect", aliases: ["标签", "Tags", "Tag"]},
     {name: "同步状态", type: "select", aliases: ["同步状态", "Sync Status"]},
@@ -408,7 +408,7 @@ export default class TogglSyncPlugin extends Plugin {
                 </div>
             </div>
             <div class="b3-dialog__action toggl-sync__settings-footer">
-                <span class="toggl-sync__settings-version">v${"0.1.11"}</span>
+                <span class="toggl-sync__settings-version">v${"0.1.12"}</span>
                 <button class="b3-button b3-button--cancel" id="ts-cancel">${this.i18n.cancel || "取消"}</button>
                 <div class="fn__space"></div>
                 <button class="b3-button b3-button--text" id="ts-save">${this.i18n.save || "保存"}</button>
@@ -1042,7 +1042,7 @@ export default class TogglSyncPlugin extends Plugin {
         this.config.avId = avId;
         await this.saveConfig();
         const keys = await this.ensureDatabaseFields(avId);
-        await this.removeUnwantedKeys(avId, keys);
+        await this.removeUnwantedKeys(avId);
         await this.ensureSyncStatusOptions({avId, keys});
         showMessage("已新建空白 Toggl Sync 数据库", 3000, "info");
     }
@@ -1259,10 +1259,13 @@ export default class TogglSyncPlugin extends Plugin {
     }
 
     // 移除思源自动创建的默认字段（不在 TOGGL_DATABASE_FIELDS 中的字段）
-    private async removeUnwantedKeys(avId: string, currentKeys: AttributeViewKey[]): Promise<void> {
+    private async removeUnwantedKeys(avId: string): Promise<void> {
         const current = await this.loadDatabaseKeys(avId);
         let removedCount = 0;
         for (const key of current) {
+            // 不删除思源必须的 block 类型主键
+            if (key.type === "block") continue;
+
             const isWanted = TOGGL_DATABASE_FIELDS.some((f) =>
                 this.normalizeKeyName(f.name) === this.normalizeKeyName(key.name) ||
                 f.aliases.some((a) => this.normalizeKeyName(a) === this.normalizeKeyName(key.name))
@@ -1340,30 +1343,28 @@ export default class TogglSyncPlugin extends Plugin {
     }
 
     private async writeTogglRow(database: TargetDatabase, rowId: string, row: TogglDatabaseRow): Promise<void> {
-        const fields: {aliases: string[]; value: DatabaseCellInput | string[];}[] = [
-            {
-                aliases: ["描述", "Description", "标题", "Title", "名称", "Name", "任务", "事项"],
-                value: row.description || "无描述",
-            },
-            {aliases: ["TogglID", "Toggl ID", "Toggl Id", "toggl-id"], value: row.id},
+        // 顺序与 TOGGL_DATABASE_FIELDS 一致
+        const fields: {aliases: string[]; value: DatabaseCellInput | string[]; usePrimary?: boolean;}[] = [
+            {aliases: ["描述", "Description"], value: row.description || "无描述", usePrimary: true},
+            {aliases: ["持续时间", "Duration Display", "Duration Text", "时长显示"], value: this.formatDuration(row.durationSeconds)},
             {aliases: ["项目", "Project"], value: row.projectName},
             {aliases: ["标签", "Tags", "Tag"], value: row.tagNames},
+            {aliases: ["同步状态", "Sync Status"], value: row.syncStatus || "正常"},
             {aliases: ["开始", "开始时间", "Start", "Start Time"], value: row.start},
             {aliases: ["结束", "结束时间", "End", "End Time", "Stop", "Stop Time"], value: row.stop},
-            {aliases: ["日期", "创建日期", "Date"], value: row.start},
-            {aliases: ["时长", "Duration"], value: row.durationSeconds},
-            {
-                aliases: ["时长显示", "持续时间", "Duration Text", "Duration Display"],
-                value: this.formatDuration(row.durationSeconds),
-            },
             {aliases: ["计费", "可计费", "Billable"], value: row.billable},
-            {aliases: ["同步状态", "Sync Status"], value: row.syncStatus || "正常"},
+            {aliases: ["时长", "Duration"], value: row.durationSeconds},
+            {aliases: ["TogglID", "Toggl ID", "Toggl Id", "toggl-id"], value: row.id},
+            {aliases: ["日期", "创建日期", "Date"], value: row.start},
         ];
 
         const writtenKeyIds = new Set<string>();
         for (const field of fields) {
-            const key = this.findKey(database.keys, field.aliases) ??
-                (field.aliases[0] === "描述" ? this.findPrimaryTextKey(database.keys) : null);
+            let key = this.findKey(database.keys, field.aliases);
+            // 描述字段降级到思源默认主文本键
+            if (!key && field.usePrimary) {
+                key = this.findPrimaryTextKey(database.keys);
+            }
             if (!key || writtenKeyIds.has(key.id) || this.isEmptyCellInput(field.value)) continue;
 
             const value = this.buildCellValue(key, rowId, field.value);
@@ -1776,7 +1777,7 @@ export default class TogglSyncPlugin extends Plugin {
     }
 
     private toDatabaseRow(entry: TimeEntry, syncStatus: SyncStatus = "正常"): TogglDatabaseRow {
-        const projectName = entry.project_id ?
+        const projectName = (entry.project_id != null && entry.project_id !== undefined) ?
             this.projects.get(entry.project_id) || `${entry.project_id}` :
             "";
         return {
@@ -1907,7 +1908,7 @@ export default class TogglSyncPlugin extends Plugin {
         }
 
         for (const entry of entries) {
-            const projectName = entry.project_id ?
+            const projectName = (entry.project_id != null && entry.project_id !== undefined) ?
                 this.projects.get(entry.project_id) || `${entry.project_id}` :
                 "";
             const tagNames = entry.tags || [];
