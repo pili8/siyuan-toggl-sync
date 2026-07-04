@@ -56,43 +56,114 @@ function authHeader(): string {
     return `Basic ${base64Encode(authToken + ":api_token")}`;
 }
 
-async function request<T>(url: string, method: string = "GET", body?: any): Promise<ApiResponse<T>> {
-    const opts: RequestInit = {
+// Lazy import of fetchSyncPost to avoid top-level circular dependencies
+let _fetchSyncPost: any = null;
+function getFetchSyncPost(): any {
+    if (!_fetchSyncPost) {
+        try {
+            const siyuan = require("siyuan");
+            _fetchSyncPost = siyuan.fetchSyncPost;
+        } catch {
+            // fetchSyncPost not available
+        }
+    }
+    return _fetchSyncPost;
+}
+
+function headersToArray(headers: Record<string, string>): Record<string, string>[] {
+    return Object.entries(headers).map(([key, val]) => ({[key]: val}));
+}
+
+async function requestViaForwardProxy<T>(url: string, method: string, body?: any): Promise<ApiResponse<T>> {
+    const authorization = authHeader();
+    const proxyHeaders = [{Authorization: authorization}];
+    if (method !== "GET" || !body) {
+        proxyHeaders.push({"Content-Type": "application/json"});
+    }
+
+    const proxyBody: any = {
+        url,
         method,
-        headers: {
-            "Content-Type": "application/json",
-            Authorization: authHeader(),
-        },
+        timeout: 15000,
+        headers: proxyHeaders,
+        contentType: "application/json",
     };
 
-    let finalUrl = url;
     if (method === "GET" && body) {
         const params = new URLSearchParams(body).toString();
-        finalUrl += `?${params}`;
+        proxyBody.url = `${url}?${params}`;
     } else if (body) {
-        opts.body = JSON.stringify(body);
+        proxyBody.payload = body;
+        proxyBody.payloadEncoding = "json";
     }
 
     try {
-        const response = await fetch(finalUrl, opts);
-        const ok = response.ok;
-        const status = response.status;
-        const quotaRemaining = parseOptionalNumber(response.headers.get("X-Toggl-Quota-Remaining"));
-        const quotaResetsIn = parseOptionalNumber(response.headers.get("X-Toggl-Quota-Resets-In"));
-        const text = await response.text();
-        const data = ok && text ? JSON.parse(text) : ({} as T);
-        return {
-            ok,
-            status,
-            data,
-            quotaRemaining,
-            quotaResetsIn,
-            error: ok ? undefined : text,
-        };
+        const fp = getFetchSyncPost();
+        if (!fp) throw new Error("fetchSyncPost not available");
+
+        const result = await fp("/api/network/forwardProxy", proxyBody);
+        if (!result || result.code !== 0) {
+            console.warn("[TogglSync] forwardProxy error:", result?.msg || "unknown");
+            return {ok: false, status: 502, data: {} as T, error: result?.msg || "forwardProxy failed"};
+        }
+
+        const proxyData = result.data;
+        const status = proxyData?.StatusCode || 502;
+        const ok = status >= 200 && status < 300;
+        const rawBody = proxyData?.Body;
+
+        let data: T;
+        if (ok && rawBody) {
+            // If body is already an object, use it directly; otherwise parse JSON
+            data = typeof rawBody === "object" ? rawBody as T : (rawBody ? JSON.parse(rawBody as string) : {} as T);
+        } else {
+            data = {} as T;
+        }
+
+        return {ok, status, data, error: ok ? undefined : (rawBody || "")};
     } catch (error) {
-        console.warn("[TogglSync] Request error:", error);
-        return {ok: false, status: 500, data: {} as T};
+        console.warn("[TogglSync] forwardProxy error:", error);
+        return {ok: false, status: 502, data: {} as T};
     }
+}
+
+async function request<T>(url: string, method: string = "GET", body?: any): Promise<ApiResponse<T>> {
+    // Try browser-native fetch first (desktop mode)
+    if (typeof fetch !== "undefined") {
+        const opts: RequestInit = {
+            method,
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: authHeader(),
+            },
+        };
+
+        let finalUrl = url;
+        if (method === "GET" && body) {
+            const params = new URLSearchParams(body).toString();
+            finalUrl += `?${params}`;
+        } else if (body) {
+            opts.body = JSON.stringify(body);
+        }
+
+        try {
+            const response = await fetch(finalUrl, opts);
+            const ok = response.ok;
+            const status = response.status;
+            const quotaRemaining = parseOptionalNumber(response.headers.get("X-Toggl-Quota-Remaining"));
+            const quotaResetsIn = parseOptionalNumber(response.headers.get("X-Toggl-Quota-Resets-In"));
+            const text = await response.text();
+            const data = ok && text ? JSON.parse(text) : ({} as T);
+            return {ok, status, data, quotaRemaining, quotaResetsIn, error: ok ? undefined : text};
+        } catch (error) {
+            console.warn("[TogglSync] fetch failed, falling back to forwardProxy:", error);
+            // Fall through to forwardProxy
+        }
+    }
+
+    // Fallback: use SiYuan kernel forwardProxy (serve mode / goja engine)
+    console.log("[TogglSync] using forwardProxy for:", method, url.substring(0, 80));
+    return requestViaForwardProxy<T>(url, method, body);
 }
 
 function parseOptionalNumber(value: string | null): number | undefined {
