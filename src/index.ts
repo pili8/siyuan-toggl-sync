@@ -821,32 +821,48 @@ export default class TogglSyncPlugin extends Plugin {
         const workspaceId = await this.ensureWorkspaceId();
         if (!workspaceId) return;
 
-        let entryId = this.lastEntryId;
-        if (!entryId) {
-            showMessage("本地没有当前计时 ID，请先手动刷新当前 Toggl 计时", 4000, "error");
-            return;
-        }
-
-        // entryId === 0 表示对应的 start 还在 pending 中，直接移除即可
-        if (entryId === 0) {
+        // 检查是否有 pending 的 start（entryId=0），先取消
+        if (this.lastEntryId === 0) {
             this.config.pendingOps = this.config.pendingOps.filter(op => op.type !== "start");
             await this.clearCurrentTimer();
             showMessage("已取消待同步的计时", 2000, "info");
             return;
         }
 
-        const response = await togglApi.stopTimeEntry(workspaceId, entryId);
-        if (!response.ok) {
-            await this.queuePendingOp({type: "stop", entryId, workspaceId});
-            await this.clearCurrentTimer();
-            return;
+        // 循环停止所有正在运行的计时器（旧版 bug 可能导致多个计时器并发）
+        let stoppedCount = 0;
+        const stoppedEntries: any[] = [];
+        for (let attempt = 0; attempt < 10; attempt++) {
+            try {
+                const current = await togglApi.getCurrentTimeEntry();
+                if (!current.ok || !(current.data as any)) break;
+
+                const entryId = (current.data as any).id as number;
+                const stopResult = await togglApi.stopTimeEntry(workspaceId, entryId);
+                if (!stopResult.ok) {
+                    console.warn("[TogglSync] stop timer #" + entryId + " failed:", stopResult.status);
+                    break;
+                }
+                stoppedEntries.push(stopResult.data);
+                stoppedCount++;
+            } catch {
+                break;
+            }
         }
 
         await this.clearCurrentTimer();
-        if (this.config.targetDocId) {
-            await this.addEntries([response.data]);
+
+        if (stoppedCount === 0) {
+            showMessage("当前没有正在运行的 Toggl 计时", 3000, "info");
+            return;
         }
-        showMessage("Toggl 计时已停止", 2000, "info");
+
+        if (this.config.targetDocId) {
+            await this.addEntries(stoppedEntries);
+            showMessage(`已停止 ${stoppedCount} 个计时并同步到数据库`, 3000, "info");
+        } else {
+            showMessage(`已停止 ${stoppedCount} 个 Toggl 计时（未配置目标文档，条目未保存）`, 4000, "info");
+        }
     }
 
     private async flushPendingOps(): Promise<number> {
