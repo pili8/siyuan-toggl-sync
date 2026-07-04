@@ -6,6 +6,7 @@ import type {
     CreateTimeEntryInput,
     UpdateTimeEntryInput,
 } from "./types";
+import {fetchSyncPost} from "siyuan";
 
 const BASE_URL = "https://api.track.toggl.com/api/v9";
 
@@ -56,24 +57,6 @@ function authHeader(): string {
     return `Basic ${base64Encode(authToken + ":api_token")}`;
 }
 
-// Lazy import of fetchSyncPost to avoid top-level circular dependencies
-let _fetchSyncPost: any = null;
-function getFetchSyncPost(): any {
-    if (!_fetchSyncPost) {
-        try {
-            const siyuan = require("siyuan");
-            _fetchSyncPost = siyuan.fetchSyncPost;
-        } catch {
-            // fetchSyncPost not available
-        }
-    }
-    return _fetchSyncPost;
-}
-
-function headersToArray(headers: Record<string, string>): Record<string, string>[] {
-    return Object.entries(headers).map(([key, val]) => ({[key]: val}));
-}
-
 async function requestViaForwardProxy<T>(url: string, method: string, body?: any): Promise<ApiResponse<T>> {
     const authorization = authHeader();
     const proxyHeaders = [{Authorization: authorization}];
@@ -84,10 +67,13 @@ async function requestViaForwardProxy<T>(url: string, method: string, body?: any
     const proxyBody: any = {
         url,
         method,
-        timeout: 15000,
+        timeout: 20000,
         headers: proxyHeaders,
-        contentType: "application/json",
     };
+
+    if (method !== "GET" || body) {
+        proxyBody.contentType = "application/json";
+    }
 
     if (method === "GET" && body) {
         const params = new URLSearchParams(body).toString();
@@ -98,13 +84,11 @@ async function requestViaForwardProxy<T>(url: string, method: string, body?: any
     }
 
     try {
-        const fp = getFetchSyncPost();
-        if (!fp) throw new Error("fetchSyncPost not available");
-
-        const result = await fp("/api/network/forwardProxy", proxyBody);
+        const result = await fetchSyncPost("/api/network/forwardProxy", proxyBody);
         if (!result || result.code !== 0) {
-            console.warn("[TogglSync] forwardProxy error:", result?.msg || "unknown");
-            return {ok: false, status: 502, data: {} as T, error: result?.msg || "forwardProxy failed"};
+            const errMsg = result?.msg || "unknown error";
+            console.warn("[TogglSync] forwardProxy failed:", errMsg, JSON.stringify(result));
+            return {ok: false, status: 502, data: {} as T, error: `forwardProxy: ${errMsg}`};
         }
 
         const proxyData = result.data;
