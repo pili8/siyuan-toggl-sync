@@ -1197,8 +1197,15 @@ export default class TogglSyncPlugin extends Plugin {
         if (!rowId) return;
 
         try {
-            for (const status of SYNC_STATUS_OPTIONS) {
-                await this.writeSyncStatus(database, rowId, status);
+            // mSelect 需要一次性写入所有选项值
+            const value = this.buildCellValue(key, rowId, SYNC_STATUS_OPTIONS);
+            if (value) {
+                await fetchSyncPost("/api/av/setAttributeViewBlockAttr", {
+                    avID: database.avId,
+                    keyID: key.id,
+                    itemID: rowId,
+                    value,
+                });
             }
         } finally {
             const txResult = await this.requestTransaction([{
