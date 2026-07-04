@@ -126,7 +126,7 @@ const SYNC_STATUS_OPTIONS: SyncStatus[] = [
 const TOGGL_DATABASE_FIELDS: DatabaseFieldDefinition[] = [
     {name: "描述", type: "text", aliases: ["描述", "Description", "标题", "Title", "名称", "Name", "任务", "事项"]},
     {name: "持续时间", type: "text", aliases: ["时长显示", "持续时间", "Duration Text", "Duration Display"]},
-    {name: "项目", type: "text", aliases: ["项目", "Project"]},
+    {name: "项目", type: "select", aliases: ["项目", "Project"]},
     {name: "标签", type: "mSelect", aliases: ["标签", "Tags", "Tag"]},
     {name: "同步状态", type: "select", aliases: ["同步状态", "Sync Status"]},
     {name: "开始", type: "date", aliases: ["开始", "开始时间", "Start", "Start Time"]},
@@ -408,7 +408,7 @@ export default class TogglSyncPlugin extends Plugin {
                 </div>
             </div>
             <div class="b3-dialog__action toggl-sync__settings-footer">
-                <span class="toggl-sync__settings-version">v${"0.1.10"}</span>
+                <span class="toggl-sync__settings-version">v${"0.1.11"}</span>
                 <button class="b3-button b3-button--cancel" id="ts-cancel">${this.i18n.cancel || "取消"}</button>
                 <div class="fn__space"></div>
                 <button class="b3-button b3-button--text" id="ts-save">${this.i18n.save || "保存"}</button>
@@ -1042,6 +1042,7 @@ export default class TogglSyncPlugin extends Plugin {
         this.config.avId = avId;
         await this.saveConfig();
         const keys = await this.ensureDatabaseFields(avId);
+        await this.removeUnwantedKeys(avId, keys);
         await this.ensureSyncStatusOptions({avId, keys});
         showMessage("已新建空白 Toggl Sync 数据库", 3000, "info");
     }
@@ -1255,6 +1256,36 @@ export default class TogglSyncPlugin extends Plugin {
             if (bi !== undefined) return 1;
             return 0;
         });
+    }
+
+    // 移除思源自动创建的默认字段（不在 TOGGL_DATABASE_FIELDS 中的字段）
+    private async removeUnwantedKeys(avId: string, currentKeys: AttributeViewKey[]): Promise<void> {
+        const current = await this.loadDatabaseKeys(avId);
+        let removedCount = 0;
+        for (const key of current) {
+            const isWanted = TOGGL_DATABASE_FIELDS.some((f) =>
+                this.normalizeKeyName(f.name) === this.normalizeKeyName(key.name) ||
+                f.aliases.some((a) => this.normalizeKeyName(a) === this.normalizeKeyName(key.name))
+            );
+            if (isWanted) continue;
+
+            try {
+                const result = await fetchSyncPost("/api/av/removeAttributeViewKey", {
+                    avID: avId,
+                    keyID: key.id,
+                });
+                if (result.code !== 0) {
+                    console.warn("[TogglSync] removeAttributeViewKey failed:", key.name, JSON.stringify(result));
+                } else {
+                    removedCount++;
+                }
+            } catch (e) {
+                console.warn("[TogglSync] removeAttributeViewKey error:", key.name, e);
+            }
+        }
+        if (removedCount > 0) {
+            console.log(`[TogglSync] removed ${removedCount} unwanted keys`);
+        }
     }
 
     private async findDatabaseAvIdInDocument(docId: string, expectedAvId?: string): Promise<string | null> {
