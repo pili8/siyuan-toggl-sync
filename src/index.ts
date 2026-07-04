@@ -1188,39 +1188,45 @@ export default class TogglSyncPlugin extends Plugin {
     }
 
     private async ensureSyncStatusOptions(database: TargetDatabase): Promise<void> {
-        if (this.config.statusOptionsPreparedAvId === database.avId) return;
-
         const key = this.findKey(database.keys, ["同步状态", "Sync Status"]);
-        if (!key) return;
+        if (!key) {
+            console.warn("[TogglSync] ensureSyncStatusOptions: key not found");
+            return;
+        }
 
+        // 每次重建数据库时强制重设（避免状态残留导致跳过）
+        if (this.config.statusOptionsPreparedAvId === database.avId) {
+            this.config.statusOptionsPreparedAvId = "";
+        }
+
+        // 写入一条种子行，一次性塞入全部选项值
         const rowId = await this.insertDatabaseRow(database.avId);
-        if (!rowId) return;
+        if (!rowId) {
+            console.warn("[TogglSync] ensureSyncStatusOptions: insert row failed");
+            return;
+        }
 
-        try {
-            // mSelect 需要一次性写入所有选项值
-            const value = this.buildCellValue(key, rowId, SYNC_STATUS_OPTIONS);
-            if (value) {
-                await fetchSyncPost("/api/av/setAttributeViewBlockAttr", {
-                    avID: database.avId,
-                    keyID: key.id,
-                    itemID: rowId,
-                    value,
-                });
-            }
-        } finally {
-            const txResult = await this.requestTransaction([{
-                action: "removeAttrViewBlock",
-                avID: database.avId,
-                srcIDs: [rowId],
-                removeDest: true,
-            }]);
-            if (!txResult || txResult.code !== 0) {
-                console.warn("[TogglSync] remove sync status option seed row failed:", JSON.stringify(txResult));
-            }
+        const value = this.buildCellValue(key, rowId, SYNC_STATUS_OPTIONS);
+        if (!value) {
+            console.warn("[TogglSync] ensureSyncStatusOptions: buildCellValue returned null");
+            return;
+        }
+
+        const result = await fetchSyncPost("/api/av/setAttributeViewBlockAttr", {
+            avID: database.avId,
+            keyID: key.id,
+            itemID: rowId,
+            value,
+        });
+
+        if (result.code !== 0) {
+            console.error("[TogglSync] set sync status options failed:", JSON.stringify(result));
+            return;
         }
 
         this.config.statusOptionsPreparedAvId = database.avId;
         await this.saveConfig();
+        console.log("[TogglSync] sync status options seeded for", database.avId);
     }
 
     private async loadDatabaseKeys(avId: string): Promise<AttributeViewKey[]> {
