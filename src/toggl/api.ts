@@ -119,35 +119,36 @@ async function requestViaForwardProxy<T>(url: string, method: string, body?: any
 }
 
 async function request<T>(url: string, method: string = "GET", body?: any): Promise<ApiResponse<T>> {
-    // Try browser-native fetch first (desktop mode)
-    if (typeof fetch !== "undefined") {
-        const headers: Record<string, string> = {
-            "Content-Type": "application/json",
-            Authorization: authHeader(),
-        };
-
-        let finalUrl = url;
-        let reqBody: string | null = null;
-        if (method === "GET" && body) {
-            finalUrl += `?${buildQueryString(body)}`;
-        } else if (body) {
-            reqBody = JSON.stringify(body);
-        }
-
+    // 始终使用内核 forwardProxy（兼容桌面和 serve 模式，绕过 CORS）
+    // 原生 fetch 在 goja 中对无 CORS 头的目标（如 Toggl API）会报 "Failed to fetch"
+    if (typeof fetch !== "undefined" && typeof URLSearchParams !== "undefined") {
         try {
-            const response = await fetch(finalUrl, {method, headers, body: reqBody});
-            const status = response.status || 0;
-            const ok = status >= 200 && status < 300;
-            const text = typeof response.text === "function" ? await response.text() : "";
-            const data = ok && text ? JSON.parse(text) : ({} as T);
-            return {ok, status, data, error: ok ? undefined : text};
-        } catch (error) {
-            console.warn("[TogglSync] fetch failed, falling back to forwardProxy:", error);
+            // 先尝试原生 fetch（更快，但可能 CORS 失败）
+            let finalUrl = url;
+            let reqBody: string | null = null;
+            if (method === "GET" && body) {
+                const params = new URLSearchParams(body).toString();
+                finalUrl += `?${params}`;
+            } else if (body) {
+                reqBody = JSON.stringify(body);
+            }
+            const response = await fetch(finalUrl, {
+                method,
+                headers: {"Content-Type": "application/json", Authorization: authHeader()},
+                body: reqBody,
+            });
+            if (response.ok) {
+                const text = await response.text();
+                const data = text ? JSON.parse(text) : ({} as T);
+                return {ok: true, status: response.status, data};
+            }
+            // 非 2xx 响应也尝试解析
+            const text = await response.text();
+            return {ok: false, status: response.status, data: {} as T, error: text};
+        } catch {
+            // CORS 或网络错误时降级到 forwardProxy
         }
     }
-
-    // Fallback: use SiYuan kernel forwardProxy (serve mode / goja engine)
-    console.log("[TogglSync] using forwardProxy for:", method, url.substring(0, 80));
     return requestViaForwardProxy<T>(url, method, body);
 }
 
