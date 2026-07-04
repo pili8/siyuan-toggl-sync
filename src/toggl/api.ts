@@ -206,3 +206,93 @@ export async function updateTimeEntry(
 export async function deleteTimeEntry(workspaceId: number, entryId: number): Promise<ApiResponse<{}>> {
     return request<{}>(`${BASE_URL}/workspaces/${workspaceId}/time_entries/${entryId}`, "DELETE");
 }
+
+// ==================== 诊断函数 ====================
+
+interface DiagResult {
+    label: string;
+    ok: boolean;
+    detail: string;
+}
+
+export async function runDiagnostics(): Promise<DiagResult[]> {
+    const results: DiagResult[] = [];
+
+    // 1. 检测引擎能力
+    const envFetchAvail = typeof fetch !== "undefined";
+    const envBtoaAvail = typeof btoa !== "undefined";
+    results.push({
+        label: "引擎能力",
+        ok: true,
+        detail: [
+            `fetch: ${envFetchAvail ? "可用" : "不可用（goja引擎）"}`,
+            `btoa:  ${envBtoaAvail ? "可用" : "不可用（使用polyfill）"}`,
+        ].join(", "),
+    });
+
+    // 2. 测试 forwardProxy
+    try {
+        const testUrl = "https://httpbin.org/get";
+        const fpResult = await fetchSyncPost("/api/network/forwardProxy", {
+            url: testUrl,
+            method: "GET",
+            timeout: 10000,
+            headers: [],
+        });
+        if (fpResult && fpResult.code === 0 && fpResult.data) {
+            const statusCode = fpResult.data.StatusCode;
+            results.push({
+                label: "forwardProxy (内核代理)",
+                ok: statusCode === 200,
+                detail: statusCode === 200
+                    ? `✅ 可用 (HTTP ${statusCode})`
+                    : `⚠️ 代理成功但目标返回 ${statusCode}`,
+            });
+        } else {
+            results.push({
+                label: "forwardProxy (内核代理)",
+                ok: false,
+                detail: `❌ 失败: code=${fpResult?.code}, msg=${fpResult?.msg || "无"}`,
+            });
+        }
+    } catch (e: any) {
+        results.push({
+            label: "forwardProxy (内核代理)",
+            ok: false,
+            detail: `❌ 异常: ${e?.message || String(e)}`,
+        });
+    }
+
+    // 3. 测试 forwardProxy 到 Toggl API
+    try {
+        const tgResult = await fetchSyncPost("/api/network/forwardProxy", {
+            url: `${BASE_URL}/me`,
+            method: "GET",
+            timeout: 15000,
+            headers: authToken ? [{Authorization: authHeader()}] : [],
+        });
+        if (tgResult && tgResult.code === 0 && tgResult.data) {
+            results.push({
+                label: "Toggl API /me",
+                ok: tgResult.data.StatusCode === 200,
+                detail: tgResult.data.StatusCode === 200
+                    ? "✅ Toggl API 可访问"
+                    : `⚠️ HTTP ${tgResult.data.StatusCode}`,
+            });
+        } else {
+            results.push({
+                label: "Toggl API /me",
+                ok: false,
+                detail: `❌ code=${tgResult?.code}, msg=${tgResult?.msg || "无"}`,
+            });
+        }
+    } catch (e: any) {
+        results.push({
+            label: "Toggl API /me",
+            ok: false,
+            detail: `❌ 异常: ${e?.message || String(e)}`,
+        });
+    }
+
+    return results;
+}

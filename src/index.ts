@@ -401,6 +401,10 @@ export default class TogglSyncPlugin extends Plugin {
                         </div>
                         <div class="toggl-sync__settings-desc">目标文档为空时，请先手动新建数据库；同步不会自动创建。</div>
                     </div>
+                    <div class="toggl-sync__settings-field">
+                        <button id="ts-diag" class="b3-button b3-button--outline" type="button" style="width:100%;">诊断网络连接</button>
+                        <div id="ts-diag-result" class="toggl-sync__settings-desc" style="margin-top:6px;white-space:pre-line;font-family:monospace;font-size:11px;"></div>
+                    </div>
                 </div>
             </div>
             <div class="b3-dialog__action toggl-sync__settings-footer">
@@ -458,6 +462,23 @@ export default class TogglSyncPlugin extends Plugin {
                     await this.cleanupLocalDeletableRows();
                 },
             );
+        });
+
+        el.querySelector("#ts-diag").addEventListener("click", async () => {
+            const btn = el.querySelector("#ts-diag") as HTMLButtonElement;
+            const resultEl = el.querySelector("#ts-diag-result") as HTMLElement;
+            btn.disabled = true;
+            btn.textContent = "诊断中...";
+            resultEl.textContent = "";
+            try {
+                const results = await togglApi.runDiagnostics();
+                resultEl.textContent = results.map((r) => `${r.ok ? "✅" : "❌"} ${r.label}: ${r.detail}`).join("\n");
+            } catch (e: any) {
+                resultEl.textContent = `❌ 诊断异常: ${e?.message || String(e)}`;
+            } finally {
+                btn.disabled = false;
+                btn.textContent = "诊断网络连接";
+            }
         });
 
         el.querySelector("#ts-create-db").addEventListener("click", async () => {
@@ -1744,7 +1765,11 @@ export default class TogglSyncPlugin extends Plugin {
 
         const response = await togglApi.getMe();
         if (!response.ok || !response.data?.default_workspace_id) {
-            showMessage(`获取 Toggl 工作区失败: HTTP ${response.status}`, 4000, "error");
+            showMessage(
+                `获取 Toggl 工作区失败: HTTP ${response.status}${response.error ? ` (${response.error})` : ""}`,
+                5000,
+                "error",
+            );
             return null;
         }
 
