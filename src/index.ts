@@ -408,6 +408,7 @@ export default class TogglSyncPlugin extends Plugin {
                 </div>
             </div>
             <div class="b3-dialog__action toggl-sync__settings-footer">
+                <span class="toggl-sync__settings-version">v${"0.1.10"}</span>
                 <button class="b3-button b3-button--cancel" id="ts-cancel">${this.i18n.cancel || "取消"}</button>
                 <div class="fn__space"></div>
                 <button class="b3-button b3-button--text" id="ts-save">${this.i18n.save || "保存"}</button>
