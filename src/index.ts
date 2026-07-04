@@ -1188,29 +1188,26 @@ export default class TogglSyncPlugin extends Plugin {
     }
 
     private async ensureSyncStatusOptions(database: TargetDatabase): Promise<void> {
+        if (this.config.statusOptionsPreparedAvId === database.avId) return;
+
         const key = this.findKey(database.keys, ["同步状态", "Sync Status"]);
-        if (!key) {
-            console.warn("[TogglSync] ensureSyncStatusOptions: key not found");
+        if (!key) return;
+
+        // 如果已有包含同步状态值的行，说明选项已存在，跳过
+        const rows = await this.readLocalDatabaseRows(database);
+        const hasOptions = rows.some((row) => row.syncStatus && row.syncStatus.trim());
+        if (hasOptions) {
+            this.config.statusOptionsPreparedAvId = database.avId;
+            await this.saveConfig();
             return;
         }
 
-        // 每次重建数据库时强制重设（避免状态残留导致跳过）
-        if (this.config.statusOptionsPreparedAvId === database.avId) {
-            this.config.statusOptionsPreparedAvId = "";
-        }
-
-        // 写入一条种子行，一次性塞入全部选项值
+        // 写入一条种子行，一次性填入全部选项
         const rowId = await this.insertDatabaseRow(database.avId);
-        if (!rowId) {
-            console.warn("[TogglSync] ensureSyncStatusOptions: insert row failed");
-            return;
-        }
+        if (!rowId) return;
 
         const value = this.buildCellValue(key, rowId, SYNC_STATUS_OPTIONS);
-        if (!value) {
-            console.warn("[TogglSync] ensureSyncStatusOptions: buildCellValue returned null");
-            return;
-        }
+        if (!value) return;
 
         const result = await fetchSyncPost("/api/av/setAttributeViewBlockAttr", {
             avID: database.avId,
@@ -1226,7 +1223,6 @@ export default class TogglSyncPlugin extends Plugin {
 
         this.config.statusOptionsPreparedAvId = database.avId;
         await this.saveConfig();
-        console.log("[TogglSync] sync status options seeded for", database.avId);
     }
 
     private async loadDatabaseKeys(avId: string): Promise<AttributeViewKey[]> {
