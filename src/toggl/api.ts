@@ -57,6 +57,14 @@ function authHeader(): string {
     return `Basic ${base64Encode(authToken + ":api_token")}`;
 }
 
+// URLSearchParams polyfill for goja
+function buildQueryString(obj: Record<string, any>): string {
+    return Object.entries(obj)
+        .filter(([, v]) => v !== undefined && v !== null)
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+        .join("&");
+}
+
 async function requestViaForwardProxy<T>(url: string, method: string, body?: any): Promise<ApiResponse<T>> {
     const authorization = authHeader();
     const proxyHeaders = [{Authorization: authorization}];
@@ -76,7 +84,7 @@ async function requestViaForwardProxy<T>(url: string, method: string, body?: any
     }
 
     if (method === "GET" && body) {
-        const params = new URLSearchParams(body).toString();
+        const params = buildQueryString(body);
         proxyBody.url = `${url}?${params}`;
     } else if (body) {
         proxyBody.payload = body;
@@ -92,19 +100,18 @@ async function requestViaForwardProxy<T>(url: string, method: string, body?: any
         }
 
         const proxyData = result.data;
-        const status = proxyData?.StatusCode || 502;
+        const status = proxyData?.StatusCode ?? proxyData?.statusCode ?? proxyData?.status ?? 502;
         const ok = status >= 200 && status < 300;
-        const rawBody = proxyData?.Body;
+        const rawBody = proxyData?.Body ?? proxyData?.body;
 
         let data: T;
         if (ok && rawBody) {
-            // If body is already an object, use it directly; otherwise parse JSON
-            data = typeof rawBody === "object" ? rawBody as T : (rawBody ? JSON.parse(rawBody as string) : {} as T);
+            data = typeof rawBody === "object" ? rawBody as T : (typeof rawBody === "string" ? JSON.parse(rawBody) : {} as T);
         } else {
             data = {} as T;
         }
 
-        return {ok, status, data, error: ok ? undefined : (rawBody || "")};
+        return {ok, status, data, error: ok ? undefined : (typeof rawBody === "string" ? rawBody : JSON.stringify(rawBody || ""))};
     } catch (error) {
         console.warn("[TogglSync] forwardProxy error:", error);
         return {ok: false, status: 502, data: {} as T};
@@ -114,34 +121,28 @@ async function requestViaForwardProxy<T>(url: string, method: string, body?: any
 async function request<T>(url: string, method: string = "GET", body?: any): Promise<ApiResponse<T>> {
     // Try browser-native fetch first (desktop mode)
     if (typeof fetch !== "undefined") {
-        const opts: RequestInit = {
-            method,
-            headers: {
-                "Content-Type": "application/json",
-                Authorization: authHeader(),
-            },
+        const headers: Record<string, string> = {
+            "Content-Type": "application/json",
+            Authorization: authHeader(),
         };
 
         let finalUrl = url;
+        let reqBody: string | null = null;
         if (method === "GET" && body) {
-            const params = new URLSearchParams(body).toString();
-            finalUrl += `?${params}`;
+            finalUrl += `?${buildQueryString(body)}`;
         } else if (body) {
-            opts.body = JSON.stringify(body);
+            reqBody = JSON.stringify(body);
         }
 
         try {
-            const response = await fetch(finalUrl, opts);
-            const ok = response.ok;
-            const status = response.status;
-            const quotaRemaining = parseOptionalNumber(response.headers.get("X-Toggl-Quota-Remaining"));
-            const quotaResetsIn = parseOptionalNumber(response.headers.get("X-Toggl-Quota-Resets-In"));
-            const text = await response.text();
+            const response = await fetch(finalUrl, {method, headers, body: reqBody});
+            const status = response.status || 0;
+            const ok = status >= 200 && status < 300;
+            const text = typeof response.text === "function" ? await response.text() : "";
             const data = ok && text ? JSON.parse(text) : ({} as T);
-            return {ok, status, data, quotaRemaining, quotaResetsIn, error: ok ? undefined : text};
+            return {ok, status, data, error: ok ? undefined : text};
         } catch (error) {
             console.warn("[TogglSync] fetch failed, falling back to forwardProxy:", error);
-            // Fall through to forwardProxy
         }
     }
 
@@ -218,80 +219,64 @@ interface DiagResult {
 export async function runDiagnostics(): Promise<DiagResult[]> {
     const results: DiagResult[] = [];
 
-    // 1. 检测引擎能力
-    const envFetchAvail = typeof fetch !== "undefined";
-    const envBtoaAvail = typeof btoa !== "undefined";
+    // 1. 引擎能力
+    const envFetch = typeof fetch !== "undefined";
+    const envBtoa = typeof btoa !== "undefined";
     results.push({
         label: "引擎能力",
         ok: true,
-        detail: [
-            `fetch: ${envFetchAvail ? "可用" : "不可用（goja引擎）"}`,
-            `btoa:  ${envBtoaAvail ? "可用" : "不可用（使用polyfill）"}`,
-        ].join(", "),
+        detail: `fetch:${envFetch ? "有" : "无"} btoa:${envBtoa ? "有" : "无(polyfill)"}`,
     });
 
-    // 2. 测试 forwardProxy
+    // 2. 实际调用 fetch
+    if (envFetch) {
+        try {
+            const r = await fetch("https://httpbin.org/get");
+            results.push({
+                label: "fetch→httpbin",
+                ok: r.status === 200,
+                detail: `HTTP ${r.status}${typeof r.text === "function" ? " (有text方法)" : " (无text方法)"}`,
+            });
+        } catch (e: any) {
+            results.push({
+                label: "fetch→httpbin",
+                ok: false,
+                detail: `❌ ${e?.message || e}`,
+            });
+        }
+    }
+
+    // 3. forwardProxy 原始数据结构
     try {
-        const testUrl = "https://httpbin.org/get";
-        const fpResult = await fetchSyncPost("/api/network/forwardProxy", {
-            url: testUrl,
+        const fp = await fetchSyncPost("/api/network/forwardProxy", {
+            url: "https://httpbin.org/get",
             method: "GET",
             timeout: 10000,
             headers: [],
         });
-        if (fpResult && fpResult.code === 0 && fpResult.data) {
-            const statusCode = fpResult.data.StatusCode;
-            results.push({
-                label: "forwardProxy (内核代理)",
-                ok: statusCode === 200,
-                detail: statusCode === 200
-                    ? `✅ 可用 (HTTP ${statusCode})`
-                    : `⚠️ 代理成功但目标返回 ${statusCode}`,
-            });
-        } else {
-            results.push({
-                label: "forwardProxy (内核代理)",
-                ok: false,
-                detail: `❌ 失败: code=${fpResult?.code}, msg=${fpResult?.msg || "无"}`,
-            });
-        }
-    } catch (e: any) {
+        const raw = JSON.stringify(fp).substring(0, 200);
+        const st = fp?.data?.StatusCode ?? fp?.data?.statusCode ?? fp?.data?.status;
         results.push({
-            label: "forwardProxy (内核代理)",
-            ok: false,
-            detail: `❌ 异常: ${e?.message || String(e)}`,
+            label: "forwardProxy 数据结构",
+            ok: fp?.code === 0,
+            detail: `code=${fp?.code} statusCode=${st ?? "?"} raw=${raw}`,
         });
+    } catch (e: any) {
+        results.push({label: "forwardProxy 数据结构", ok: false, detail: `❌ ${e?.message || e}`});
     }
 
-    // 3. 测试 forwardProxy 到 Toggl API
-    try {
-        const tgResult = await fetchSyncPost("/api/network/forwardProxy", {
-            url: `${BASE_URL}/me`,
-            method: "GET",
-            timeout: 15000,
-            headers: authToken ? [{Authorization: authHeader()}] : [],
-        });
-        if (tgResult && tgResult.code === 0 && tgResult.data) {
+    // 4. fetch 直连 Toggl
+    if (envFetch && authToken) {
+        try {
+            const r = await fetch(`${BASE_URL}/me`, {headers: {Authorization: authHeader()}});
             results.push({
-                label: "Toggl API /me",
-                ok: tgResult.data.StatusCode === 200,
-                detail: tgResult.data.StatusCode === 200
-                    ? "✅ Toggl API 可访问"
-                    : `⚠️ HTTP ${tgResult.data.StatusCode}`,
+                label: "fetch→Toggl /me",
+                ok: r.status === 200,
+                detail: `HTTP ${r.status}`,
             });
-        } else {
-            results.push({
-                label: "Toggl API /me",
-                ok: false,
-                detail: `❌ code=${tgResult?.code}, msg=${tgResult?.msg || "无"}`,
-            });
+        } catch (e: any) {
+            results.push({label: "fetch→Toggl /me", ok: false, detail: `❌ ${e?.message || e}`});
         }
-    } catch (e: any) {
-        results.push({
-            label: "Toggl API /me",
-            ok: false,
-            detail: `❌ 异常: ${e?.message || String(e)}`,
-        });
     }
 
     return results;
