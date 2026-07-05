@@ -23,8 +23,9 @@
 ```
 同步开始
   → flushPendingOps（重试暂存操作）
+  → backfillSyncStatus（回填缺失的同步状态）
   → pushLocalChanges（上行：本地待上传/未同步/Toggl待更新/待删除）
   → applyRemoteEntries（下行：Toggl 拉取新数据覆盖本地）
-  → refreshTogglTimer（刷新计时器状态）
+  → refreshCurrentTimer（刷新计时器状态）
 同步结束
 ```

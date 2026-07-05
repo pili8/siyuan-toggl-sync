@@ -150,7 +150,17 @@ async function request<T>(url: string, method: string = "GET", body?: any): Prom
             });
             if (response.ok) {
                 const text = await response.text();
-                const data = text ? JSON.parse(text) : ({} as T);
+                let data: T;
+                if (text) {
+                    try {
+                        data = JSON.parse(text);
+                    } catch {
+                        console.warn("[TogglSync] fetch: invalid JSON body:", text.substring(0, 200));
+                        data = {} as T;
+                    }
+                } else {
+                    data = {} as T;
+                }
                 return {ok: true, status: response.status, data};
             }
             // 非 2xx 响应也尝试解析

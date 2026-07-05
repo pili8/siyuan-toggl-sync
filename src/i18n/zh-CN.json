@@ -29,5 +29,12 @@
   "save": "保存",
   "startTimer": "开始计时",
   "stopTimer": "停止计时",
-  "manualEntry": "补录条目"
+  "manualEntry": "补录条目",
+  "viewPending": "查看待处理",
+  "pendingOps": "待处理操作",
+  "repairSync": "首次/修复同步",
+  "repairSyncConfirm": "修复同步会对比本地与 Toggl 数据，本地有但 Toggl 没有的条目将被标记为可删除。确定继续？",
+  "stopAllConfirm": "检测到 {count} 个正在运行的计时器，确定全部停止？",
+  "clearSyncConfirm": "清空同步时间后，下次同步将重新拉取全部数据。确定继续？",
+  "timerRunningWarn": "当前正在计时：{desc}（已 {duration}），开始新计时将自动停止当前计时"
 }

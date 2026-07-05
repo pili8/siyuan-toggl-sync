@@ -31,6 +31,8 @@ interface PluginConfig {
     pendingOps: PendingOp[];
     avId?: string;
     statusOptionsPreparedAvId?: string;
+    lastProjectId?: number;
+    lastTags?: string[];
 }
 
 const DEFAULT_CONFIG: PluginConfig = {
@@ -49,6 +51,7 @@ const DEFAULT_CONFIG: PluginConfig = {
 };
 
 const CONFIG_FILE = "toggl-sync.json";
+const PLUGIN_VERSION = "0.2.0";
 
 type AttributeViewKey = {
     id: string;
@@ -181,6 +184,7 @@ export default class TogglSyncPlugin extends Plugin {
     private syncInProgress = false;
     private lastEntryId: number | null = null;
     private suppressDatabasePrompt = false;
+    private workspaceIdPromise: Promise<number | null> | null = null;
 
     async onload() {
         await this.loadConfig();
@@ -293,7 +297,57 @@ export default class TogglSyncPlugin extends Plugin {
                 await this.openManualEntryDialog();
             },
         });
+        if (this.config.pendingOps.length > 0) {
+            menu.addItem({
+                icon: "iconList",
+                label: `${this.i18n.viewPending} (${this.config.pendingOps.length})`,
+                click: () => {
+                    this.showPendingOpsDialog();
+                },
+            });
+        }
         menu.open(position ?? {x: window.innerWidth - 200, y: 32});
+    }
+
+    private showPendingOpsDialog() {
+        const ops = this.config.pendingOps;
+        const rows = ops.map((op, i) => {
+            const type = op.type === "start" ? "开始计时" : op.type === "stop" ? "停止计时" : "补录条目";
+            const desc = op.type === "start" ? op.description :
+                op.type === "manual" ? op.description : `#${op.entryId}`;
+            return `<tr>
+                <td style="padding:4px 8px;">${i + 1}</td>
+                <td style="padding:4px 8px;">${type}</td>
+                <td style="padding:4px 8px;">${this.escapeHtml(desc)}</td>
+                <td style="padding:4px 8px;color:var(--b3-theme-on-surface-light);font-size:11px;">${op.type === "start" ? op.start : op.type === "manual" ? op.start : "-"}</td>
+            </tr>`;
+        }).join("");
+
+        const dialog = new Dialog({
+            title: `待处理操作（${ops.length} 条）`,
+            content: `<div class="b3-dialog__content" style="padding:16px;">
+                <p style="margin-bottom:12px;font-size:12px;color:var(--b3-theme-on-surface-light);">
+                    以下操作因 API 暂不可用被暂存，将在下次同步时自动重试。
+                </p>
+                <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                    <thead>
+                        <tr style="border-bottom:1px solid var(--b3-border-color);">
+                            <th style="padding:4px 8px;text-align:left;">#</th>
+                            <th style="padding:4px 8px;text-align:left;">类型</th>
+                            <th style="padding:4px 8px;text-align:left;">描述</th>
+                            <th style="padding:4px 8px;text-align:left;">时间</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+            <div class="b3-dialog__action">
+                <button class="b3-button b3-button--cancel" id="ts-pending-close">关闭</button>
+            </div>`,
+            width: "500px",
+        });
+
+        dialog.element.querySelector("#ts-pending-close")!.addEventListener("click", () => dialog.destroy());
     }
 
     openSetting() {
@@ -408,7 +462,7 @@ export default class TogglSyncPlugin extends Plugin {
                 </div>
             </div>
             <div class="b3-dialog__action toggl-sync__settings-footer">
-                <span class="toggl-sync__settings-version">v${"0.1.13"}</span>
+                <span class="toggl-sync__settings-version">v${PLUGIN_VERSION}</span>
                 <button class="b3-button b3-button--cancel" id="ts-cancel">${this.i18n.cancel || "取消"}</button>
                 <div class="fn__space"></div>
                 <button class="b3-button b3-button--text" id="ts-save">${this.i18n.save || "保存"}</button>
@@ -436,7 +490,16 @@ export default class TogglSyncPlugin extends Plugin {
             }
         });
 
-        el.querySelector("#ts-clearSync").addEventListener("click", () => {
+        el.querySelector("#ts-clearSync").addEventListener("click", async () => {
+            const ok = await new Promise<boolean>((resolve) => {
+                confirm(
+                    "清空同步时间后，下次同步将重新拉取全部数据。确定继续？",
+                    "清空同步时间",
+                    () => resolve(true),
+                    () => resolve(false),
+                );
+            });
+            if (!ok) return;
             this.config.lastSyncTime = "";
             const lastSyncEl = el.querySelector("#ts-lastSync") as HTMLElement;
             lastSyncEl.textContent = this.i18n.never;
@@ -444,6 +507,15 @@ export default class TogglSyncPlugin extends Plugin {
         });
 
         el.querySelector("#ts-repair-sync").addEventListener("click", async () => {
+            const ok = await new Promise<boolean>((resolve) => {
+                confirm(
+                    "修复同步会对比本地与 Toggl 数据，本地有但 Toggl 没有的条目将被标记为可删除。确定继续？",
+                    "首次/修复同步",
+                    () => resolve(true),
+                    () => resolve(false),
+                );
+            });
+            if (!ok) return;
             await this.runButtonAction(
                 el.querySelector("#ts-repair-sync") as HTMLButtonElement,
                 "同步中...",
@@ -524,6 +596,7 @@ export default class TogglSyncPlugin extends Plugin {
             this.config.currentTimer = null;
             this.projects.clear();
             this.tags = [];
+            this.workspaceIdPromise = null;
             await this.clearCurrentTimer();
         }
         togglApi.setToken(this.config.token);
@@ -549,9 +622,19 @@ export default class TogglSyncPlugin extends Plugin {
         await this.refreshProjects();
         await this.refreshTags();
 
+        // 检测当前是否有计时在跑
+        const runningWarn = this.lastEntryId !== null && this.lastEntryStart ?
+            `<div style="padding:8px 12px;margin-bottom:12px;border-radius:6px;background:var(--b3-card-warning-background);border:1px solid var(--b3-card-warning-border);font-size:12px;color:var(--b3-card-warning-color);">
+                ⚠️ 当前正在计时：${this.escapeHtml(this.lastEntryDescription || "无描述")}（已 ${this.formatDuration(Math.floor((Date.now() - new Date(this.lastEntryStart).getTime()) / 1000))}），开始新计时将自动停止当前计时
+            </div>` : "";
+
+        const lastProjectSelected = this.config.lastProjectId ? `value="${this.config.lastProjectId}"` : "";
+        const lastTagsValue = this.config.lastTags?.length ? this.escapeHtml(this.config.lastTags.join(", ")) : "";
+
         const dialog = new Dialog({
             title: "开始 Toggl 计时",
             content: `<div class="b3-dialog__content" style="padding:16px;">
+                ${runningWarn}
                 <div class="fn__flex" style="flex-direction:column;gap:14px;">
                     <div>
                         <label class="b3-label" style="display:block;margin-bottom:4px;font-weight:bold;">描述</label>
@@ -560,14 +643,14 @@ export default class TogglSyncPlugin extends Plugin {
                     <div>
                         <label class="b3-label" style="display:block;margin-bottom:4px;font-weight:bold;">项目</label>
                         <div class="toggl-sync__dialog-row">
-                            <select id="ts-start-project" class="b3-select toggl-sync__dialog-control">${this.renderProjectOptions()}</select>
+                            <select id="ts-start-project" class="b3-select toggl-sync__dialog-control">${this.renderProjectOptions(lastProjectSelected)}</select>
                             <button id="ts-start-refresh-projects" class="b3-button b3-button--outline toggl-sync__dialog-action" type="button">刷新</button>
                         </div>
                     </div>
                     <div>
                         <label class="b3-label" style="display:block;margin-bottom:4px;font-weight:bold;">标签</label>
                         <div class="toggl-sync__dialog-row">
-                            <input id="ts-start-tags" class="b3-text-field toggl-sync__dialog-control" list="ts-start-tags-list" placeholder="多个标签用逗号分隔">
+                            <input id="ts-start-tags" class="b3-text-field toggl-sync__dialog-control" list="ts-start-tags-list" placeholder="多个标签用逗号分隔" value="${lastTagsValue}">
                             <datalist id="ts-start-tags-list">${this.renderTagOptions()}</datalist>
                             <button id="ts-start-refresh-tags" class="b3-button b3-button--outline toggl-sync__dialog-action" type="button">刷新</button>
                         </div>
@@ -608,6 +691,11 @@ export default class TogglSyncPlugin extends Plugin {
             const tags = this.parseTags((el.querySelector("#ts-start-tags") as HTMLInputElement).value);
             const billable = (el.querySelector("#ts-start-billable") as HTMLInputElement).checked;
 
+            // 记住上次选择
+            this.config.lastProjectId = projectId;
+            this.config.lastTags = tags;
+            await this.saveConfig();
+
             const started = await this.startTogglTimer({description, projectId, tags, billable});
             button.disabled = false;
             if (started) {
@@ -632,15 +720,22 @@ export default class TogglSyncPlugin extends Plugin {
                         <label class="b3-label" style="display:block;margin-bottom:4px;font-weight:bold;">描述</label>
                         <input id="ts-manual-desc" class="b3-text-field" style="width:100%;" placeholder="做了什么">
                     </div>
-                    <div>
-                        <label class="b3-label" style="display:block;margin-bottom:4px;font-weight:bold;">开始时间</label>
-                        <input id="ts-manual-start" class="b3-text-field" type="datetime-local" style="width:100%;" value="${
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                        <div>
+                            <label class="b3-label" style="display:block;margin-bottom:4px;font-weight:bold;">开始时间</label>
+                            <input id="ts-manual-start" class="b3-text-field" type="datetime-local" style="width:100%;" value="${
                 this.toDateTimeInputValue(new Date())
             }">
+                        </div>
+                        <div>
+                            <label class="b3-label" style="display:block;margin-bottom:4px;font-weight:bold;">结束时间</label>
+                            <input id="ts-manual-end" class="b3-text-field" type="datetime-local" style="width:100%;" placeholder="留空则用时长计算">
+                        </div>
                     </div>
                     <div>
                         <label class="b3-label" style="display:block;margin-bottom:4px;font-weight:bold;">时长（分钟）</label>
                         <input id="ts-manual-duration" class="b3-text-field" type="number" min="1" step="1" style="width:100%;" value="30">
+                        <div style="margin-top:4px;font-size:11px;color:var(--b3-theme-on-surface-light);">填写结束时间后将自动计算时长</div>
                     </div>
                     <div>
                         <label class="b3-label" style="display:block;margin-bottom:4px;font-weight:bold;">项目</label>
@@ -690,15 +785,27 @@ export default class TogglSyncPlugin extends Plugin {
             button.disabled = true;
             const description = (el.querySelector("#ts-manual-desc") as HTMLInputElement).value.trim();
             const startValue = (el.querySelector("#ts-manual-start") as HTMLInputElement).value;
-            const durationMinutes = Number((el.querySelector("#ts-manual-duration") as HTMLInputElement).value);
+            const endValue = (el.querySelector("#ts-manual-end") as HTMLInputElement).value;
+            const durationInput = (el.querySelector("#ts-manual-duration") as HTMLInputElement).value;
             const projectId = Number((el.querySelector("#ts-manual-project") as HTMLSelectElement).value) || undefined;
             const tags = this.parseTags((el.querySelector("#ts-manual-tags") as HTMLInputElement).value);
             const billable = (el.querySelector("#ts-manual-billable") as HTMLInputElement).checked;
 
+            const startDate = new Date(startValue);
+            let durationSeconds: number;
+
+            // 优先用结束时间算时长
+            if (endValue) {
+                const endDate = new Date(endValue);
+                durationSeconds = Math.round((endDate.getTime() - startDate.getTime()) / 1000);
+            } else {
+                durationSeconds = Math.round(Number(durationInput) * 60);
+            }
+
             const created = await this.createManualTogglEntry({
                 description,
-                start: new Date(startValue),
-                durationSeconds: Math.round(durationMinutes * 60),
+                start: startDate,
+                durationSeconds,
                 projectId,
                 tags,
                 billable,
@@ -879,15 +986,22 @@ export default class TogglSyncPlugin extends Plugin {
             return;
         }
 
+        // 先查当前有多少计时器在跑
+        const current = await togglApi.getCurrentTimeEntry();
+        if (!current.ok || !current.data) {
+            showMessage("当前没有正在运行的 Toggl 计时", 3000, "info");
+            return;
+        }
+
         // 循环停止所有正在运行的计时器（旧版 bug 可能导致多个计时器并发）
         let stoppedCount = 0;
         const stoppedEntries: any[] = [];
         for (let attempt = 0; attempt < 10; attempt++) {
             try {
-                const current = await togglApi.getCurrentTimeEntry();
-                if (!current.ok || !(current.data as any)) break;
+                const cur = await togglApi.getCurrentTimeEntry();
+                if (!cur.ok || !(cur.data as any)) break;
 
-                const entryId = (current.data as any).id as number;
+                const entryId = (cur.data as any).id as number;
                 const stopResult = await togglApi.stopTimeEntry(workspaceId, entryId);
                 if (!stopResult.ok) {
                     console.warn("[TogglSync] stop timer #" + entryId + " failed:", stopResult.status);
@@ -992,6 +1106,7 @@ export default class TogglSyncPlugin extends Plugin {
                 const response = await togglApi.createTimeEntry(workspaceId, manualBody);
                 if (!response.ok) {
                     remaining.push(op);
+                    remaining.push(...ops.slice(i + 1));
                     break;
                 }
                 if (this.config.targetDocId) {
@@ -1257,6 +1372,14 @@ export default class TogglSyncPlugin extends Plugin {
             });
         }
 
+        // 清理种子行
+        await this.requestTransaction([{
+            action: "removeAttrViewBlock",
+            avID: database.avId,
+            srcIDs: [rowId],
+            removeDest: true,
+        }]);
+
         this.config.statusOptionsPreparedAvId = database.avId;
         await this.saveConfig();
     }
@@ -1465,6 +1588,9 @@ export default class TogglSyncPlugin extends Plugin {
         const silent = mode === "auto";
         if (!silent) {
             showMessage(mode === "repair" ? "开始首次/修复同步..." : "开始同步 Toggl 数据...", 2000, "info");
+        } else if (this.statusBarEl) {
+            // auto 同步时在状态栏短暂显示同步中
+            this.statusBarEl.setAttribute("data-syncing", "1");
         }
 
         try {
@@ -1477,6 +1603,7 @@ export default class TogglSyncPlugin extends Plugin {
             }
 
             await this.refreshProjects();
+            await this.refreshTags();
 
             if (this.config.pendingOps.length > 0) {
                 const flushed = await this.flushPendingOps();
@@ -1486,6 +1613,8 @@ export default class TogglSyncPlugin extends Plugin {
             }
 
             let localRows = await this.readLocalDatabaseRows(database);
+            // 回填缺失的同步状态（纯写，不在 read 函数中做）
+            await this.backfillSyncStatus(database, localRows);
             const localResult = await this.pushLocalChanges(database, localRows);
             if (localResult.created > 0 || localResult.updated > 0 || localResult.deleted > 0) {
                 localRows = await this.readLocalDatabaseRows(database);
@@ -1537,6 +1666,9 @@ export default class TogglSyncPlugin extends Plugin {
         } finally {
             this.suppressDatabasePrompt = false;
             this.syncInProgress = false;
+            if (this.statusBarEl) {
+                this.statusBarEl.removeAttribute("data-syncing");
+            }
         }
     }
 
@@ -1736,7 +1868,7 @@ export default class TogglSyncPlugin extends Plugin {
             }
 
             if (local) {
-                if (local.syncStatus === "Toggl 待更新" || local.syncStatus === "Toggl 待删除") {
+                if (local.syncStatus === "Toggl 待更新" || local.syncStatus === "Toggl 待删除" || local.syncStatus === "失败") {
                     result.skippedPending++;
                     continue;
                 }
@@ -1780,7 +1912,7 @@ export default class TogglSyncPlugin extends Plugin {
         if (!row.start) return null;
         const duration = this.resolveDurationSeconds(row);
         const stop = row.stop ?? (duration > 0 ? new Date(row.start.getTime() + duration * 1000) : null);
-        return {
+        const input: CreateTimeEntryInput = {
             workspace_id: workspaceId,
             description: row.description || "无描述",
             start: row.start.toISOString(),
@@ -1788,27 +1920,33 @@ export default class TogglSyncPlugin extends Plugin {
             duration: duration > 0 ? duration : -1,
             created_with: "siyuan-toggl-sync",
             project_id: this.findProjectIdByName(row.projectName) ?? null,
-            tags: row.tagNames,
-            tag_action: row.tagNames.length > 0 ? "add" : undefined,
             billable: row.billable,
         };
+        if (row.tagNames.length > 0) {
+            input.tags = row.tagNames;
+            input.tag_action = "add";
+        }
+        return input;
     }
 
     private buildUpdateInputFromLocalRow(row: LocalDatabaseRow, workspaceId: number): UpdateTimeEntryInput | null {
         if (!row.start) return null;
         const duration = this.resolveDurationSeconds(row);
         const stop = row.stop ?? (duration > 0 ? new Date(row.start.getTime() + duration * 1000) : null);
-        return {
+        const input: UpdateTimeEntryInput = {
             workspace_id: workspaceId,
             description: row.description || "无描述",
             start: row.start.toISOString(),
             stop: stop ? stop.toISOString() : null,
             duration: duration > 0 ? duration : -1,
             project_id: this.findProjectIdByName(row.projectName) ?? null,
-            tags: row.tagNames,
-            tag_action: row.tagNames.length > 0 ? "add" : undefined,
             billable: row.billable,
         };
+        if (row.tagNames.length > 0) {
+            input.tags = row.tagNames;
+            input.tag_action = "add";
+        }
+        return input;
     }
 
     private resolveDurationSeconds(row: LocalDatabaseRow): number {
@@ -1846,7 +1984,14 @@ export default class TogglSyncPlugin extends Plugin {
 
     private async ensureWorkspaceId(): Promise<number | null> {
         if (this.config.workspaceId) return this.config.workspaceId;
+        if (this.workspaceIdPromise) return this.workspaceIdPromise;
+        this.workspaceIdPromise = this._doEnsureWorkspaceId();
+        const result = await this.workspaceIdPromise;
+        this.workspaceIdPromise = null;
+        return result;
+    }
 
+    private async _doEnsureWorkspaceId(): Promise<number | null> {
         const response = await togglApi.getMe();
         if (!response.ok || !response.data?.default_workspace_id) {
             showMessage(
@@ -1862,10 +2007,11 @@ export default class TogglSyncPlugin extends Plugin {
         return this.config.workspaceId;
     }
 
-    private renderProjectOptions(): string {
+    private renderProjectOptions(selectedAttr?: string): string {
         let html = `<option value="">无项目</option>`;
         this.projects.forEach((name, id) => {
-            html += `<option value="${id}">${this.escapeHtml(name)}</option>`;
+            const sel = selectedAttr && `value="${id}"` === selectedAttr ? "selected" : "";
+            html += `<option value="${id}" ${sel}>${this.escapeHtml(name)}</option>`;
         });
         return html;
     }
@@ -1959,28 +2105,13 @@ export default class TogglSyncPlugin extends Plugin {
         }
 
         for (const entry of entries) {
-            const projectName = (entry.project_id != null && entry.project_id !== undefined) ?
-                this.projects.get(entry.project_id) || `${entry.project_id}` :
-                "";
-            const tagNames = entry.tags || [];
-
             const rowId = await this.insertDatabaseRow(targetDatabase.avId);
             if (!rowId) {
                 console.error("[TogglSync] Failed to insert database row for entry:", entry.id);
                 continue;
             }
 
-            await this.writeTogglRow(targetDatabase, rowId, {
-                id: entry.id,
-                description: entry.description || "无描述",
-                projectName,
-                tagNames,
-                start: new Date(entry.start),
-                stop: entry.stop ? new Date(entry.stop) : null,
-                durationSeconds: Math.max(0, entry.duration),
-                billable: entry.billable,
-                syncStatus: "正常",
-            });
+            await this.writeTogglRow(targetDatabase, rowId, this.toDatabaseRow(entry, "正常"));
         }
     }
 
@@ -2051,64 +2182,6 @@ export default class TogglSyncPlugin extends Plugin {
 
     private extractRenderedRowIds(data: any): string[] {
         return this.extractRows(data).map((row) => row?.key?.id ?? row?.id ?? row?.blockID).filter(Boolean);
-    }
-
-    private hasActiveViewFilterOrGroup(data: any): boolean {
-        return this.extractViews(data).some((view) => this.viewHasActiveFilterOrGroup(view));
-    }
-
-    private extractViews(data: any): any[] {
-        const viewArrays = [
-            data?.views,
-            data?.av?.views,
-            data?.attributeView?.views,
-        ].filter(Array.isArray);
-        if (viewArrays.length > 0) {
-            return viewArrays.flat();
-        }
-
-        return [
-            data?.view,
-            data?.av?.view,
-            data?.attributeView?.view,
-            data,
-        ].filter((view) => view && typeof view === "object");
-    }
-
-    private viewHasActiveFilterOrGroup(view: any): boolean {
-        if (this.objectHasDirectActiveFilterOrGroup(view)) return true;
-        return [view?.table, view?.gallery, view?.board, view?.calendar].some((item) =>
-            this.objectHasDirectActiveFilterOrGroup(item)
-        );
-    }
-
-    private objectHasDirectActiveFilterOrGroup(value: any): boolean {
-        if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-        return Object.entries(value).some(([key, item]) => {
-            const normalizedKey = key.toLowerCase();
-            if (normalizedKey.includes("filter") || normalizedKey.includes("group")) return this.hasMeaningfulViewSetting(item);
-            // 递归检测深层对象（3.7.0 组合筛选可能嵌套在 conditions/criteria 中）
-            if (typeof item === "object" && !Array.isArray(item) && this.objectHasDirectActiveFilterOrGroup(item)) {
-                return true;
-            }
-            return false;
-        });
-    }
-
-    private hasMeaningfulViewSetting(value: any): boolean {
-        if (value === null || value === undefined) return false;
-        if (Array.isArray(value)) return value.length > 0;
-        if (typeof value === "boolean") return value;
-        if (typeof value === "number") return value !== 0;
-        if (typeof value === "string") return value.trim().length > 0 && value !== "0" && value !== "false";
-        if (typeof value === "object") {
-            // 3.7.0 组合筛选可能包含 conditions/items/columns 等嵌套结构
-            if (Array.isArray(value.conditions)) return value.conditions.length > 0;
-            if (Array.isArray(value.items)) return value.items.length > 0;
-            if (Array.isArray(value.columns)) return value.columns.length > 0;
-            return Object.keys(value).length > 0;
-        }
-        return false;
     }
 
     private normalizeAttributeViewKeys(data: any): AttributeViewKey[] {
@@ -2304,12 +2377,17 @@ export default class TogglSyncPlugin extends Plugin {
         for (const row of rows) {
             if (!row.syncStatus) {
                 row.syncStatus = row.togglId ? "正常" : "未同步";
-                if (!row.togglId && (row.description || row.start)) {
-                    await this.writeSyncStatus(database, row.rowId, "未同步");
-                }
             }
         }
         return rows;
+    }
+
+    private async backfillSyncStatus(database: TargetDatabase, rows: LocalDatabaseRow[]): Promise<void> {
+        for (const row of rows) {
+            if (!row.syncStatus && !row.togglId && (row.description || row.start)) {
+                await this.writeSyncStatus(database, row.rowId, "未同步");
+            }
+        }
     }
 
     private isMeaningfulLocalRow(row: LocalDatabaseRow): boolean {
@@ -2410,12 +2488,22 @@ export default class TogglSyncPlugin extends Plugin {
     }
 
     private async requestTransaction(doOperations: any[]): Promise<any> {
-        const wsUrl = window.siyuan.ws.ws.url;
-        const parsed = new URL(wsUrl);
-        const params = new URLSearchParams(parsed.search);
+        let session = "";
+        let app = "";
+        try {
+            const wsUrl = window.siyuan?.ws?.ws?.url;
+            if (wsUrl) {
+                const parsed = new URL(wsUrl);
+                const params = new URLSearchParams(parsed.search);
+                session = params.get("id") || "";
+                app = params.get("app") || "";
+            }
+        } catch {
+            // ws 未就绪时降级
+        }
         return fetchSyncPost("/api/transactions", {
-            session: params.get("id"),
-            app: params.get("app"),
+            session,
+            app,
             transactions: [{doOperations, undoOperations: []}],
             reqId: Date.now(),
         });
@@ -2460,12 +2548,6 @@ export default class TogglSyncPlugin extends Plugin {
     private leftPad(value: number, length: number): string {
         let result = String(value);
         while (result.length < length) result = `0${result}`;
-        return result;
-    }
-
-    private rightPad(value: string, length: number): string {
-        let result = value;
-        while (result.length < length) result = `${result}0`;
         return result;
     }
 
@@ -2523,26 +2605,6 @@ export default class TogglSyncPlugin extends Plugin {
         }
     }
 
-    private async toggleStatusBarTimer() {
-        const nextEnabled = !this.config.statusBarTimer;
-        if (nextEnabled) {
-            if (!this.config.token) {
-                showMessage("请先配置 Toggl API Token", 4000, "error");
-                return;
-            }
-            this.config.statusBarTimer = true;
-            await this.saveConfig();
-            await this.startStatusBarTimer(true);
-            showMessage("状态栏计时器已开启", 2000, "info");
-        } else {
-            this.config.statusBarTimer = false;
-            await this.saveConfig();
-            this.stopStatusBarTimer();
-            this.renderIdleState();
-            showMessage("状态栏计时器已关闭", 2000, "info");
-        }
-    }
-
     private renderTimer(elapsed: number) {
         if (!this.statusBarEl) return;
         const h = Math.floor(elapsed / 3600);
@@ -2550,17 +2612,27 @@ export default class TogglSyncPlugin extends Plugin {
         const s = elapsed % 60;
         const time = `${h}:${this.leftPad(m, 2)}:${this.leftPad(s, 2)}`;
         const desc = this.escapeHtml(this.lastEntryDescription || "...");
+        const badge = this.renderPendingBadge();
         this.statusBarEl.innerHTML =
             `<span class="toggl-sync__status-bar-dot toggl-sync__status-bar-dot--running"></span>` +
             `<span class="toggl-sync__status-bar-desc" title="${desc}">${desc}</span>` +
-            `<span class="toggl-sync__status-bar-time">${time}</span>`;
+            `<span class="toggl-sync__status-bar-time">${time}</span>` +
+            badge;
     }
 
     private renderIdleState() {
         if (!this.statusBarEl) return;
         const text = this.escapeHtml(this.normalizeStatusBarText(this.config.statusBarText));
+        const badge = this.renderPendingBadge();
         this.statusBarEl.innerHTML = `<span class="toggl-sync__status-bar-dot"></span>` +
-            `<span class="toggl-sync__status-bar-time">${text}</span>`;
+            `<span class="toggl-sync__status-bar-time">${text}</span>` +
+            badge;
+    }
+
+    private renderPendingBadge(): string {
+        const count = this.config.pendingOps.length;
+        if (count === 0) return "";
+        return `<span class="toggl-sync__status-bar-badge" title="${count} 条待处理操作">${count}</span>`;
     }
 
     private async updateCurrentTimerFromEntry(entry: TimeEntry) {

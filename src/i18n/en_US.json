@@ -29,5 +29,12 @@
   "save": "Save",
   "startTimer": "Start Timer",
   "stopTimer": "Stop Timer",
-  "manualEntry": "Manual Entry"
+  "manualEntry": "Manual Entry",
+  "viewPending": "View Pending",
+  "pendingOps": "Pending Operations",
+  "repairSync": "Repair Sync",
+  "repairSyncConfirm": "Repair sync compares local data with Toggl. Entries that exist locally but not in Toggl will be marked as deletable. Continue?",
+  "stopAllConfirm": "Detected {count} running timer(s). Stop all?",
+  "clearSyncConfirm": "Clearing sync time will re-fetch all data on next sync. Continue?",
+  "timerRunningWarn": "Currently tracking: {desc} ({duration}). Starting a new timer will stop the current one."
 }
