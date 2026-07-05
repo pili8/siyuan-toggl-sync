@@ -1496,6 +1496,12 @@ export default class TogglSyncPlugin extends Plugin {
             }
             this.config.lastSyncTime = syncStartedAt.toISOString();
             await this.saveConfig();
+
+            // 同步时顺便刷新计时器状态（感知 Toggl 端的停止操作）
+            if (this.config.statusBarTimer) {
+                await this.refreshTogglTimer(true);
+            }
+
             const actionText = [
                 localResult.created ? `上传 ${localResult.created}` : "",
                 localResult.updated ? `更新 Toggl ${localResult.updated}` : "",
