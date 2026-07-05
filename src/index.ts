@@ -805,13 +805,14 @@ export default class TogglSyncPlugin extends Plugin {
 
         // 先在思源写入一行，状态标记为「本地待上传」
         const database = await this.getTargetDatabase();
+        let seedRowId: string | null = null;
         if (database) {
             const projectName = input.projectId ?
                 this.projects.get(input.projectId) || `${input.projectId}` :
                 "";
-            const rowId = await this.insertDatabaseRow(database.avId);
-            if (rowId) {
-                await this.writeTogglRow(database, rowId, {
+            seedRowId = await this.insertDatabaseRow(database.avId);
+            if (seedRowId) {
+                await this.writeTogglRow(database, seedRowId, {
                     id: 0,
                     description: input.description || "无描述",
                     projectName,
@@ -852,14 +853,10 @@ export default class TogglSyncPlugin extends Plugin {
         }
 
         // API 成功后更新本地行
-        if (database) {
-            const rows = await this.readLocalDatabaseRows(database);
-            const localRow = rows.find((r) => r.togglId === 0 && r.description === (input.description || "无描述"));
-            if (localRow) {
-                await this.writeTogglRow(database, localRow.rowId, this.toDatabaseRow(response.data, "正常"));
-            } else {
-                await this.addEntries([response.data], database);
-            }
+        if (database && seedRowId) {
+            await this.writeTogglRow(database, seedRowId, this.toDatabaseRow(response.data, "正常"));
+        } else if (database) {
+            await this.addEntries([response.data], database);
         }
         showMessage("Toggl 条目已补录", 2000, "info");
         return true;
@@ -922,13 +919,16 @@ export default class TogglSyncPlugin extends Plugin {
         if (this.config.pendingOps.length === 0) return 0;
 
         let flushed = 0;
+        const ops = [...this.config.pendingOps];
         const remaining: PendingOp[] = [];
 
-        for (const op of this.config.pendingOps) {
+        for (let i = 0; i < ops.length; i++) {
+            const op = ops[i];
             if (op.type === "start") {
                 const workspaceId = await this.ensureWorkspaceId();
                 if (!workspaceId) {
                     remaining.push(op);
+                    remaining.push(...ops.slice(i + 1));
                     break;
                 }
                 const startBody: any = {
@@ -947,6 +947,7 @@ export default class TogglSyncPlugin extends Plugin {
                 const response = await togglApi.createTimeEntry(workspaceId, startBody);
                 if (!response.ok) {
                     remaining.push(op);
+                    remaining.push(...ops.slice(i + 1));
                     break;
                 }
                 await this.updateCurrentTimerFromEntry(response.data);
@@ -963,12 +964,14 @@ export default class TogglSyncPlugin extends Plugin {
                     flushed++;
                 } else {
                     remaining.push(op);
+                    remaining.push(...ops.slice(i + 1));
                     break;
                 }
             } else if (op.type === "manual") {
                 const workspaceId = await this.ensureWorkspaceId();
                 if (!workspaceId) {
                     remaining.push(op);
+                    remaining.push(...ops.slice(i + 1));
                     break;
                 }
                 const stop = new Date(new Date(op.start).getTime() + op.durationSeconds * 1000);

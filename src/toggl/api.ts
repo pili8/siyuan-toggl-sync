@@ -106,7 +106,18 @@ async function requestViaForwardProxy<T>(url: string, method: string, body?: any
 
         let data: T;
         if (ok && rawBody) {
-            data = typeof rawBody === "object" ? rawBody as T : (typeof rawBody === "string" ? JSON.parse(rawBody) : {} as T);
+            if (typeof rawBody === "object") {
+                data = rawBody as T;
+            } else if (typeof rawBody === "string") {
+                try {
+                    data = JSON.parse(rawBody);
+                } catch {
+                    console.warn("[TogglSync] forwardProxy: invalid JSON body:", rawBody.substring(0, 200));
+                    data = {} as T;
+                }
+            } else {
+                data = {} as T;
+            }
         } else {
             data = {} as T;
         }
