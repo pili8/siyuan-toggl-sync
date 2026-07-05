@@ -748,17 +748,20 @@ export default class TogglSyncPlugin extends Plugin {
         await this.autoStopRunningTimer(workspaceId);
 
         const start = new Date();
-        const response = await togglApi.createTimeEntry(workspaceId, {
+        const createBody: any = {
             workspace_id: workspaceId,
             description: input.description || "无描述",
             start: start.toISOString(),
             duration: -1,
             created_with: "siyuan-toggl-sync",
             project_id: input.projectId,
-            tags: input.tags,
-            tag_action: input.tags.length > 0 ? "add" : undefined,
             billable: input.billable,
-        });
+        };
+        if (input.tags.length > 0) {
+            createBody.tags = input.tags;
+            createBody.tag_action = "add";
+        }
+        const response = await togglApi.createTimeEntry(workspaceId, createBody);
 
         if (!response.ok) {
             await this.queuePendingOp({
@@ -827,7 +830,7 @@ export default class TogglSyncPlugin extends Plugin {
         if (!workspaceId) return true; // 已写入本地，等下次同步推送
 
         const stop = new Date(input.start.getTime() + input.durationSeconds * 1000);
-        const response = await togglApi.createTimeEntry(workspaceId, {
+        const manualBody: any = {
             workspace_id: workspaceId,
             description: input.description || "无描述",
             start: input.start.toISOString(),
@@ -835,10 +838,13 @@ export default class TogglSyncPlugin extends Plugin {
             duration: input.durationSeconds,
             created_with: "siyuan-toggl-sync",
             project_id: input.projectId,
-            tags: input.tags,
-            tag_action: input.tags.length > 0 ? "add" : undefined,
             billable: input.billable,
-        });
+        };
+        if (input.tags.length > 0) {
+            manualBody.tags = input.tags;
+            manualBody.tag_action = "add";
+        }
+        const response = await togglApi.createTimeEntry(workspaceId, manualBody);
 
         if (!response.ok) {
             showMessage("已写入本地（待下次同步上传）", 3000, "info");
@@ -925,17 +931,20 @@ export default class TogglSyncPlugin extends Plugin {
                     remaining.push(op);
                     break;
                 }
-                const response = await togglApi.createTimeEntry(workspaceId, {
+                const startBody: any = {
                     workspace_id: workspaceId,
                     description: op.description || "无描述",
                     start: op.start,
                     duration: -1,
                     created_with: "siyuan-toggl-sync",
                     project_id: op.projectId,
-                    tags: op.tags,
-                    tag_action: op.tags.length > 0 ? "add" : undefined,
                     billable: op.billable,
-                });
+                };
+                if (op.tags.length > 0) {
+                    startBody.tags = op.tags;
+                    startBody.tag_action = "add";
+                }
+                const response = await togglApi.createTimeEntry(workspaceId, startBody);
                 if (!response.ok) {
                     remaining.push(op);
                     break;
@@ -963,18 +972,21 @@ export default class TogglSyncPlugin extends Plugin {
                     break;
                 }
                 const stop = new Date(new Date(op.start).getTime() + op.durationSeconds * 1000);
-                const response = await togglApi.createTimeEntry(workspaceId, {
+                const manualBody: any = {
                     workspace_id: workspaceId,
                     description: op.description || "无描述",
                     start: op.start,
                     duration: op.durationSeconds,
                     created_with: "siyuan-toggl-sync",
                     project_id: op.projectId,
-                    tags: op.tags,
-                    tag_action: op.tags.length > 0 ? "add" : undefined,
                     billable: op.billable,
                     stop: stop.toISOString(),
-                });
+                };
+                if (op.tags.length > 0) {
+                    manualBody.tags = op.tags;
+                    manualBody.tag_action = "add";
+                }
+                const response = await togglApi.createTimeEntry(workspaceId, manualBody);
                 if (!response.ok) {
                     remaining.push(op);
                     break;
