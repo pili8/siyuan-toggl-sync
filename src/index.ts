@@ -128,7 +128,7 @@ const TOGGL_DATABASE_FIELDS: DatabaseFieldDefinition[] = [
     {name: "持续时间", type: "text", aliases: ["持续时间", "Duration Display", "Duration Text", "时长显示"]},
     {name: "项目", type: "select", aliases: ["项目", "Project"]},
     {name: "标签", type: "mSelect", aliases: ["标签", "Tags", "Tag"]},
-    {name: "同步状态", type: "mSelect", aliases: ["同步状态", "Sync Status"]},
+    {name: "同步状态", type: "select", aliases: ["同步状态", "Sync Status"]},
     {name: "开始", type: "date", aliases: ["开始", "开始时间", "Start", "Start Time"]},
     {name: "结束", type: "date", aliases: ["结束", "结束时间", "End", "End Time", "Stop", "Stop Time"]},
     {name: "计费", type: "checkbox", aliases: ["计费", "可计费", "Billable"]},
@@ -711,6 +711,9 @@ export default class TogglSyncPlugin extends Plugin {
     }
 
     private async autoStopRunningTimer(workspaceId: number): Promise<void> {
+        // 本地无追踪中的计时器，跳过 API 调用（省时）
+        if (this.lastEntryId === null) return;
+
         try {
             const current = await togglApi.getCurrentTimeEntry();
             const runningEntry: any = current.ok ? current.data : null;
@@ -1193,7 +1196,7 @@ export default class TogglSyncPlugin extends Plugin {
         const key = this.findKey(database.keys, ["同步状态", "Sync Status"]);
         if (!key) return;
 
-        // 如果已有包含同步状态值的行，说明选项已存在，跳过
+        // 如果已有含同步状态值的行，说明选项已存在，跳过
         const rows = await this.readLocalDatabaseRows(database);
         const hasOptions = rows.some((row) => row.syncStatus && row.syncStatus.trim());
         if (hasOptions) {
@@ -1202,23 +1205,19 @@ export default class TogglSyncPlugin extends Plugin {
             return;
         }
 
-        // 写入一条种子行，一次性填入全部选项
+        // 种子行：逐个写入全部状态值，填充 select 下拉选项
         const rowId = await this.insertDatabaseRow(database.avId);
         if (!rowId) return;
 
-        const value = this.buildCellValue(key, rowId, SYNC_STATUS_OPTIONS);
-        if (!value) return;
-
-        const result = await fetchSyncPost("/api/av/setAttributeViewBlockAttr", {
-            avID: database.avId,
-            keyID: key.id,
-            itemID: rowId,
-            value,
-        });
-
-        if (result.code !== 0) {
-            console.error("[TogglSync] set sync status options failed:", JSON.stringify(result));
-            return;
+        for (const status of SYNC_STATUS_OPTIONS) {
+            const value = this.buildCellValue(key, rowId, status);
+            if (!value) continue;
+            await fetchSyncPost("/api/av/setAttributeViewBlockAttr", {
+                avID: database.avId,
+                keyID: key.id,
+                itemID: rowId,
+                value,
+            });
         }
 
         this.config.statusOptionsPreparedAvId = database.avId;
@@ -1640,7 +1639,7 @@ export default class TogglSyncPlugin extends Plugin {
                 continue;
             }
 
-            if (row.syncStatus === "Toggl 待更新") {
+            if (row.syncStatus === "Toggl 待更新" || row.syncStatus === "未同步") {
                 const input = this.buildUpdateInputFromLocalRow(row, workspaceId);
                 if (!input) {
                     await this.writeSyncStatus(database, row.rowId, "失败");
@@ -1764,7 +1763,7 @@ export default class TogglSyncPlugin extends Plugin {
             duration: duration > 0 ? duration : -1,
             project_id: this.findProjectIdByName(row.projectName) ?? null,
             tags: row.tagNames,
-            tag_action: "add",
+            tag_action: row.tagNames.length > 0 ? "add" : undefined,
             billable: row.billable,
         };
     }
@@ -2589,6 +2588,9 @@ export default class TogglSyncPlugin extends Plugin {
         if (!this.config.token || !this.config.targetDocId || this.config.autoSyncMinutes <= 0) return;
         this.autoSyncInterval = setInterval(() => {
             void this.syncEntries("auto");
+            if (this.config.statusBarTimer) {
+                void this.refreshTogglTimer(true);
+            }
         }, this.config.autoSyncMinutes * 60 * 1000);
     }
 
