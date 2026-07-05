@@ -51,7 +51,7 @@ const DEFAULT_CONFIG: PluginConfig = {
 };
 
 const CONFIG_FILE = "toggl-sync.json";
-const PLUGIN_VERSION = "0.2.0";
+const PLUGIN_VERSION = "0.2.1";
 
 type AttributeViewKey = {
     id: string;
@@ -892,7 +892,11 @@ export default class TogglSyncPlugin extends Plugin {
             return true;
         }
 
-        await this.updateCurrentTimerFromEntry(response.data);
+        // 纠正 Toggl 偷偷填的默认项目/标签（用户没选时强制清空云端）
+        const correctedEntry = await this.stripEntryDefaults(
+            response.data, workspaceId, input.projectId, input.tags,
+        );
+        await this.updateCurrentTimerFromEntry(correctedEntry);
         showMessage("Toggl 计时已开始", 2000, "info");
         return true;
     }
@@ -959,11 +963,17 @@ export default class TogglSyncPlugin extends Plugin {
             return true;
         }
 
-        // API 成功后更新本地行
+        // 纠正 Toggl 偷偷填的默认项目/标签
+        const correctedEntry = await this.stripEntryDefaults(
+            response.data, workspaceId, input.projectId, input.tags,
+        );
+
+        // API 成功后更新本地行（以用户原始输入为准）
         if (database && seedRowId) {
-            await this.writeTogglRow(database, seedRowId, this.toDatabaseRow(response.data, "正常"));
+            await this.writeTogglRow(database, seedRowId,
+                this.toDatabaseRowWithUserIntent(correctedEntry, "正常", input.projectId, input.tags));
         } else if (database) {
-            await this.addEntries([response.data], database);
+            await this.addEntries([correctedEntry], database);
         }
         showMessage("Toggl 条目已补录", 2000, "info");
         return true;
@@ -1064,7 +1074,11 @@ export default class TogglSyncPlugin extends Plugin {
                     remaining.push(...ops.slice(i + 1));
                     break;
                 }
-                await this.updateCurrentTimerFromEntry(response.data);
+                // 纠正 Toggl 偷偷填的默认项目/标签
+                const corrected = await this.stripEntryDefaults(
+                    response.data, workspaceId, op.projectId, op.tags,
+                );
+                await this.updateCurrentTimerFromEntry(corrected);
                 flushed++;
             } else if (op.type === "stop") {
                 const response = await togglApi.stopTimeEntry(op.workspaceId, op.entryId);
@@ -1109,8 +1123,12 @@ export default class TogglSyncPlugin extends Plugin {
                     remaining.push(...ops.slice(i + 1));
                     break;
                 }
+                // 纠正 Toggl 偷偷填的默认项目/标签
+                const corrected = await this.stripEntryDefaults(
+                    response.data, workspaceId, op.projectId, op.tags,
+                );
                 if (this.config.targetDocId) {
-                    await this.addEntries([response.data]);
+                    await this.addEntries([corrected]);
                 }
                 flushed++;
             }
@@ -1809,7 +1827,13 @@ export default class TogglSyncPlugin extends Plugin {
                     result.failed++;
                     continue;
                 }
-                await this.writeTogglRow(database, row.rowId, this.toDatabaseRow(response.data, "正常"));
+                // 纠正 Toggl 偷偷填的默认项目/标签（本地无项目/标签时清空云端）
+                const expectedProjectId = this.findProjectIdByName(row.projectName);
+                const corrected = await this.stripEntryDefaults(
+                    response.data, workspaceId, expectedProjectId, row.tagNames,
+                );
+                await this.writeTogglRow(database, row.rowId,
+                    this.toDatabaseRowWithUserIntent(corrected, "正常", expectedProjectId, row.tagNames));
                 result.created++;
                 continue;
             }
@@ -1828,7 +1852,13 @@ export default class TogglSyncPlugin extends Plugin {
                     result.failed++;
                     continue;
                 }
-                await this.writeTogglRow(database, row.rowId, this.toDatabaseRow(response.data, "正常"));
+                // 纠正 Toggl 偷偷填的默认项目/标签
+                const expectedProjectId = this.findProjectIdByName(row.projectName);
+                const corrected = await this.stripEntryDefaults(
+                    response.data, workspaceId, expectedProjectId, row.tagNames,
+                );
+                await this.writeTogglRow(database, row.rowId,
+                    this.toDatabaseRowWithUserIntent(corrected, "正常", expectedProjectId, row.tagNames));
                 result.updated++;
             } else if (row.syncStatus === "Toggl 待删除") {
                 const response = await togglApi.deleteTimeEntry(workspaceId, row.togglId);
@@ -1974,6 +2004,63 @@ export default class TogglSyncPlugin extends Plugin {
             description: entry.description || "无描述",
             projectName,
             tagNames: entry.tags || [],
+            start: new Date(entry.start),
+            stop: entry.stop ? new Date(entry.stop) : null,
+            durationSeconds: Math.max(0, entry.duration),
+            billable: entry.billable,
+            syncStatus,
+        };
+    }
+
+    /**
+     * 纠正 Toggl 返回的 entry：如果用户没选项目/标签，但 Toggl 填了默认值，强制清空。
+     * 返回纠正后的 entry（如果是新创建的会被 update API 覆盖云端，如果是已存在的只在本地写库时纠正）。
+     */
+    private async stripEntryDefaults(
+        entry: TimeEntry,
+        workspaceId: number,
+        expectedProjectId?: number,
+        expectedTags?: string[],
+    ): Promise<TimeEntry> {
+        const needStripProject = expectedProjectId === undefined && entry.project_id != null;
+        const needStripTags = (!expectedTags || expectedTags.length === 0) &&
+            Array.isArray(entry.tags) && entry.tags.length > 0;
+
+        if (!needStripProject && !needStripTags) return entry;
+
+        const updateBody: any = {};
+        if (needStripProject) updateBody.project_id = null;
+        if (needStripTags) {
+            updateBody.tags = [];
+            updateBody.tag_action = "delete";
+        }
+
+        const updateRes = await togglApi.updateTimeEntry(workspaceId, entry.id, updateBody);
+        if (updateRes.ok && updateRes.data) {
+            return updateRes.data;
+        }
+        // update 失败时返回原 entry，但本地写库时仍按用户期望处理
+        return entry;
+    }
+
+    /**
+     * 构造用于写本地的 row，以用户原始输入为准（覆盖 Toggl 返回的默认值）。
+     */
+    private toDatabaseRowWithUserIntent(
+        entry: TimeEntry,
+        syncStatus: SyncStatus,
+        userProjectId?: number,
+        userTags?: string[],
+    ): TogglDatabaseRow {
+        const projectName = userProjectId !== undefined ?
+            (this.projects.get(userProjectId) || `${userProjectId}`) :
+            "";
+        const tagNames = userTags && userTags.length > 0 ? userTags : [];
+        return {
+            id: entry.id,
+            description: entry.description || "无描述",
+            projectName,
+            tagNames,
             start: new Date(entry.start),
             stop: entry.stop ? new Date(entry.stop) : null,
             durationSeconds: Math.max(0, entry.duration),
