@@ -1511,7 +1511,7 @@ export default class TogglSyncPlugin extends Plugin {
 
             // 同步时顺便刷新计时器状态（感知 Toggl 端的停止操作）
             if (this.config.statusBarTimer) {
-                await this.refreshTogglTimer(true);
+                await this.refreshCurrentTimer(true);
             }
 
             const actionText = [
@@ -2612,8 +2612,10 @@ export default class TogglSyncPlugin extends Plugin {
             return;
         }
         const res = await togglApi.getCurrentTimeEntry();
-        if (res.ok && res.data) {
-            await this.updateCurrentTimerFromEntry(res.data);
+        // forwardProxy 可能将 null body 转为 {}，所以额外检查 id 字段
+        const hasData = res.ok && res.data && (res.data as any).id;
+        if (hasData) {
+            await this.updateCurrentTimerFromEntry(res.data as TimeEntry);
             if (!silent) showMessage(`已刷新当前 Toggl 计时${this.formatQuotaText(res)}`, 3000, "info");
         } else if (res.ok) {
             await this.clearCurrentTimer();
@@ -2629,7 +2631,7 @@ export default class TogglSyncPlugin extends Plugin {
         this.autoSyncInterval = setInterval(() => {
             void this.syncEntries("auto");
             if (this.config.statusBarTimer) {
-                void this.refreshTogglTimer(true);
+                void this.refreshCurrentTimer(true);
             }
         }, this.config.autoSyncMinutes * 60 * 1000);
     }
