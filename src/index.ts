@@ -754,7 +754,7 @@ export default class TogglSyncPlugin extends Plugin {
             start: start.toISOString(),
             duration: -1,
             created_with: "siyuan-toggl-sync",
-            project_id: input.projectId,
+            project_id: input.projectId ?? null,
             billable: input.billable,
         };
         if (input.tags.length > 0) {
@@ -837,7 +837,7 @@ export default class TogglSyncPlugin extends Plugin {
             stop: stop.toISOString(),
             duration: input.durationSeconds,
             created_with: "siyuan-toggl-sync",
-            project_id: input.projectId,
+            project_id: input.projectId ?? null,
             billable: input.billable,
         };
         if (input.tags.length > 0) {
@@ -937,7 +937,7 @@ export default class TogglSyncPlugin extends Plugin {
                     start: op.start,
                     duration: -1,
                     created_with: "siyuan-toggl-sync",
-                    project_id: op.projectId,
+                    project_id: op.projectId ?? null,
                     billable: op.billable,
                 };
                 if (op.tags.length > 0) {
@@ -978,7 +978,7 @@ export default class TogglSyncPlugin extends Plugin {
                     start: op.start,
                     duration: op.durationSeconds,
                     created_with: "siyuan-toggl-sync",
-                    project_id: op.projectId,
+                    project_id: op.projectId ?? null,
                     billable: op.billable,
                     stop: stop.toISOString(),
                 };
@@ -1784,7 +1784,7 @@ export default class TogglSyncPlugin extends Plugin {
             stop: stop ? stop.toISOString() : undefined,
             duration: duration > 0 ? duration : -1,
             created_with: "siyuan-toggl-sync",
-            project_id: this.findProjectIdByName(row.projectName),
+            project_id: this.findProjectIdByName(row.projectName) ?? null,
             tags: row.tagNames,
             tag_action: row.tagNames.length > 0 ? "add" : undefined,
             billable: row.billable,
