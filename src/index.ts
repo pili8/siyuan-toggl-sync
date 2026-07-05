@@ -800,8 +800,31 @@ export default class TogglSyncPlugin extends Plugin {
             return false;
         }
 
+        // 先在思源写入一行，状态标记为「本地待上传」
+        const database = await this.getTargetDatabase();
+        if (database) {
+            const projectName = input.projectId ?
+                this.projects.get(input.projectId) || `${input.projectId}` :
+                "";
+            const rowId = await this.insertDatabaseRow(database.avId);
+            if (rowId) {
+                await this.writeTogglRow(database, rowId, {
+                    id: 0,
+                    description: input.description || "无描述",
+                    projectName,
+                    tagNames: input.tags,
+                    start: input.start,
+                    stop: new Date(input.start.getTime() + input.durationSeconds * 1000),
+                    durationSeconds: input.durationSeconds,
+                    billable: input.billable,
+                    syncStatus: "本地待上传",
+                });
+            }
+        }
+
+        // 尝试推送到 Toggl
         const workspaceId = await this.ensureWorkspaceId();
-        if (!workspaceId) return false;
+        if (!workspaceId) return true; // 已写入本地，等下次同步推送
 
         const stop = new Date(input.start.getTime() + input.durationSeconds * 1000);
         const response = await togglApi.createTimeEntry(workspaceId, {
@@ -818,20 +841,19 @@ export default class TogglSyncPlugin extends Plugin {
         });
 
         if (!response.ok) {
-            await this.queuePendingOp({
-                type: "manual",
-                description: input.description,
-                start: input.start.toISOString(),
-                durationSeconds: input.durationSeconds,
-                projectId: input.projectId,
-                tags: input.tags,
-                billable: input.billable,
-            });
+            showMessage("已写入本地（待下次同步上传）", 3000, "info");
             return true;
         }
 
-        if (this.config.targetDocId) {
-            await this.addEntries([response.data]);
+        // API 成功后更新本地行
+        if (database) {
+            const rows = await this.readLocalDatabaseRows(database);
+            const localRow = rows.find((r) => r.togglId === 0 && r.description === (input.description || "无描述"));
+            if (localRow) {
+                await this.writeTogglRow(database, localRow.rowId, this.toDatabaseRow(response.data, "正常"));
+            } else {
+                await this.addEntries([response.data], database);
+            }
         }
         showMessage("Toggl 条目已补录", 2000, "info");
         return true;
