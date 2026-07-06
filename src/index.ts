@@ -34,6 +34,7 @@ interface PluginConfig {
     statusOptionsVersion?: number;
     lastProjectId?: number;
     lastTags?: string[];
+    apiEnabled?: boolean;
 }
 
 const DEFAULT_CONFIG: PluginConfig = {
@@ -49,10 +50,11 @@ const DEFAULT_CONFIG: PluginConfig = {
     tagCache: [],
     currentTimer: null,
     pendingOps: [],
+    apiEnabled: true,
 };
 
 const CONFIG_FILE = "toggl-sync.json";
-const PLUGIN_VERSION = "0.3.1";
+const PLUGIN_VERSION = "0.4.0";
 
 type AttributeViewKey = {
     id: string;
@@ -374,6 +376,15 @@ export default class TogglSyncPlugin extends Plugin {
                         </div>
                         <div class="toggl-sync__settings-desc">${this.i18n.tokenDesc}</div>
                     </div>
+                    <div class="toggl-sync__settings-field">
+                        <label class="toggl-sync__settings-switch">
+                            <input id="ts-api-enabled" type="checkbox" class="b3-switch" ${
+                this.config.apiEnabled !== false ? "checked" : ""
+            }>
+                            <span>启用 Toggl API</span>
+                        </label>
+                        <div class="toggl-sync__settings-desc">关闭后所有操作仅在本地数据库运行，不上传也不下拉 Toggl。适合排查问题或离线使用。</div>
+                    </div>
                 </div>
 
                 <div class="toggl-sync__settings-section">
@@ -680,6 +691,7 @@ export default class TogglSyncPlugin extends Plugin {
             Number((el.querySelector("#ts-days") as HTMLSelectElement).value),
         );
         this.config.autoSyncMinutes = Number((el.querySelector("#ts-auto-sync") as HTMLSelectElement).value);
+        this.config.apiEnabled = (el.querySelector("#ts-api-enabled") as HTMLInputElement).checked;
         this.config.statusBarTimer = (el.querySelector("#ts-statusbar") as HTMLInputElement).checked;
         this.config.statusBarText = this.normalizeStatusBarText(
             (el.querySelector("#ts-statusbar-text") as HTMLInputElement).value,
@@ -916,7 +928,7 @@ export default class TogglSyncPlugin extends Plugin {
         }
 
         // ② 如果已推送到 Toggl，尝试停止云端计时器
-        if (prevTimer.id !== 0) {
+        if (prevTimer.id !== 0 && this.config.apiEnabled !== false) {
             try {
                 const current = await togglApi.getCurrentTimeEntry();
                 const runningEntry: any = current.ok ? current.data : null;
@@ -936,11 +948,16 @@ export default class TogglSyncPlugin extends Plugin {
         projectId?: number;
         tags: string[];
     }): Promise<boolean> {
-        const workspaceId = await this.ensureWorkspaceId();
-        if (!workspaceId) return false;
+        let workspaceId = 0;
+        if (this.config.apiEnabled !== false) {
+            workspaceId = await this.ensureWorkspaceId();
+            if (!workspaceId) return false;
+        }
 
-        // 启动新计时前，先停止当前正在运行的计时器（避免多个计时器并发运行）
-        await this.autoStopRunningTimer(workspaceId);
+        // 启动新计时前，先停止当前正在运行的计时器
+        if (workspaceId > 0 || this.config.apiEnabled === false) {
+            await this.autoStopRunningTimer(workspaceId);
+        }
 
         const start = new Date();
         const projectName = input.projectId ?
@@ -998,6 +1015,7 @@ export default class TogglSyncPlugin extends Plugin {
     }) {
         const {workspaceId, input, start, database, localRowId} = params;
         (async () => {
+            if (this.config.apiEnabled === false) return;
             const createBody: any = {
                 workspace_id: workspaceId,
                 description: input.description || "无描述",
@@ -1080,6 +1098,7 @@ export default class TogglSyncPlugin extends Plugin {
     }) {
         const {input, database, seedRowId} = params;
         (async () => {
+            if (this.config.apiEnabled === false) return;
             const workspaceId = await this.ensureWorkspaceId();
             if (!workspaceId) return;
 
@@ -1140,7 +1159,7 @@ export default class TogglSyncPlugin extends Plugin {
         // ① 更新本地行的停止信息
         if (prevTimer.localRowId && prevTimer.databaseAvId) {
             await this.updateLocalTimerStop(prevTimer.databaseAvId, prevTimer.localRowId, stopTime, elapsed, newStatus);
-        } else if (!prevTimer.localRowId && prevTimer.id !== 0) {
+        } else if (!prevTimer.localRowId && prevTimer.id !== 0 && this.config.apiEnabled !== false) {
             // ② 没有本地行但已推送到 Toggl（云端计时器）：停止后写入本地
             try {
                 const stopResult = await togglApi.stopTimeEntry(workspaceId, prevTimer.id);
@@ -1153,7 +1172,7 @@ export default class TogglSyncPlugin extends Plugin {
         }
 
         // ③ 尝试通过 API 推送停止操作（如果有 togglId）
-        if (prevTimer.id !== 0) {
+        if (prevTimer.id !== 0 && this.config.apiEnabled !== false) {
             try {
                 const current = await togglApi.getCurrentTimeEntry();
                 if (current.ok && (current.data as any)?.id === prevTimer.id) {
@@ -1807,6 +1826,7 @@ export default class TogglSyncPlugin extends Plugin {
     // ==================== 同步逻辑 ====================
 
     private async syncEntries(mode: SyncMode = "regular") {
+        if (this.config.apiEnabled === false) return;
         if (this.syncInProgress) {
             showMessage("同步正在进行中，请稍后", 2500, "info");
             return;
@@ -2930,6 +2950,7 @@ export default class TogglSyncPlugin extends Plugin {
     }
 
     private async refreshCurrentTimer(silent = false) {
+        if (this.config.apiEnabled === false) return;
         if (!this.config.token) {
             if (!silent) showMessage("请先配置 Toggl API Token", 4000, "error");
             return;
