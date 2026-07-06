@@ -54,7 +54,7 @@ const DEFAULT_CONFIG: PluginConfig = {
 };
 
 const CONFIG_FILE = "toggl-sync.json";
-const PLUGIN_VERSION = "0.4.0";
+const PLUGIN_VERSION = "0.4.1";
 
 type AttributeViewKey = {
     id: string;
