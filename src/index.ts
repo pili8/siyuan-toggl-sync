@@ -52,7 +52,7 @@ const DEFAULT_CONFIG: PluginConfig = {
 };
 
 const CONFIG_FILE = "toggl-sync.json";
-const PLUGIN_VERSION = "0.2.7";
+const PLUGIN_VERSION = "0.3.0";
 
 type AttributeViewKey = {
     id: string;
@@ -135,7 +135,6 @@ const TOGGL_DATABASE_FIELDS: DatabaseFieldDefinition[] = [
     {name: "同步状态", type: "select", aliases: ["同步状态", "Sync Status"]},
     {name: "开始", type: "date", aliases: ["开始", "开始时间", "Start", "Start Time"]},
     {name: "结束", type: "date", aliases: ["结束", "结束时间", "End", "End Time", "Stop", "Stop Time"]},
-    {name: "计费", type: "checkbox", aliases: ["计费", "可计费", "Billable"]},
     {name: "时长", type: "number", aliases: ["时长", "Duration"]},
     {name: "TogglID", type: "number", aliases: ["TogglID", "Toggl ID", "Toggl Id", "toggl-id"]},
     {name: "日期", type: "date", aliases: ["日期", "创建日期", "Date"]},
@@ -752,10 +751,6 @@ export default class TogglSyncPlugin extends Plugin {
                             <button id="ts-start-refresh-tags" class="b3-button b3-button--outline toggl-sync__dialog-action" type="button">刷新</button>
                         </div>
                     </div>
-                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-                        <input id="ts-start-billable" type="checkbox" class="b3-switch">
-                        <span>可计费</span>
-                    </label>
                 </div>
             </div>
             <div class="b3-dialog__action">
@@ -786,14 +781,13 @@ export default class TogglSyncPlugin extends Plugin {
             const description = (el.querySelector("#ts-start-desc") as HTMLInputElement).value.trim();
             const projectId = Number((el.querySelector("#ts-start-project") as HTMLSelectElement).value) || undefined;
             const tags = this.parseTags((el.querySelector("#ts-start-tags") as HTMLInputElement).value);
-            const billable = (el.querySelector("#ts-start-billable") as HTMLInputElement).checked;
 
             // 记住上次选择
             this.config.lastProjectId = projectId;
             this.config.lastTags = tags;
             await this.saveConfig();
 
-            const started = await this.startTogglTimer({description, projectId, tags, billable});
+            const started = await this.startTogglTimer({description, projectId, tags});
             button.disabled = false;
             if (started) {
                 dialog.destroy();
@@ -849,10 +843,6 @@ export default class TogglSyncPlugin extends Plugin {
                             <button id="ts-manual-refresh-tags" class="b3-button b3-button--outline toggl-sync__dialog-action" type="button">刷新</button>
                         </div>
                     </div>
-                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-                        <input id="ts-manual-billable" type="checkbox" class="b3-switch">
-                        <span>可计费</span>
-                    </label>
                 </div>
             </div>
             <div class="b3-dialog__action">
@@ -886,7 +876,6 @@ export default class TogglSyncPlugin extends Plugin {
             const durationInput = (el.querySelector("#ts-manual-duration") as HTMLInputElement).value;
             const projectId = Number((el.querySelector("#ts-manual-project") as HTMLSelectElement).value) || undefined;
             const tags = this.parseTags((el.querySelector("#ts-manual-tags") as HTMLInputElement).value);
-            const billable = (el.querySelector("#ts-manual-billable") as HTMLInputElement).checked;
 
             const startDate = new Date(startValue);
             let durationSeconds: number;
@@ -905,7 +894,6 @@ export default class TogglSyncPlugin extends Plugin {
                 durationSeconds,
                 projectId,
                 tags,
-                billable,
             });
             button.disabled = false;
             if (created) {
@@ -947,7 +935,6 @@ export default class TogglSyncPlugin extends Plugin {
         description: string;
         projectId?: number;
         tags: string[];
-        billable: boolean;
     }): Promise<boolean> {
         const workspaceId = await this.ensureWorkspaceId();
         if (!workspaceId) return false;
@@ -973,7 +960,7 @@ export default class TogglSyncPlugin extends Plugin {
                     start: start,
                     stop: null,
                     durationSeconds: 0,
-                    billable: input.billable,
+                    billable: false,
                     syncStatus: "本地待上传",
                 });
             }
@@ -1004,7 +991,7 @@ export default class TogglSyncPlugin extends Plugin {
 
     private pushTimerToToggl(params: {
         workspaceId: number;
-        input: {description: string; projectId?: number; tags: string[]; billable: boolean};
+        input: {description: string; projectId?: number; tags: string[]};
         start: Date;
         database: TargetDatabase | null;
         localRowId: string | null;
@@ -1017,7 +1004,6 @@ export default class TogglSyncPlugin extends Plugin {
                 start: start.toISOString(),
                 duration: -1,
                 created_with: "siyuan-toggl-sync",
-                billable: input.billable,
             };
             if (input.projectId !== undefined) {
                 createBody.project_id = input.projectId;
@@ -1074,7 +1060,7 @@ export default class TogglSyncPlugin extends Plugin {
                     start: input.start,
                     stop: new Date(input.start.getTime() + input.durationSeconds * 1000),
                     durationSeconds: input.durationSeconds,
-                    billable: input.billable,
+                    billable: false,
                     syncStatus: "本地待上传",
                 });
             }
@@ -1104,7 +1090,6 @@ export default class TogglSyncPlugin extends Plugin {
                 stop: stop.toISOString(),
                 duration: input.durationSeconds,
                 created_with: "siyuan-toggl-sync",
-                billable: input.billable,
             };
             if (input.projectId !== undefined) {
                 manualBody.project_id = input.projectId;
@@ -1209,7 +1194,6 @@ export default class TogglSyncPlugin extends Plugin {
                     start: op.start,
                     duration: -1,
                     created_with: "siyuan-toggl-sync",
-                    billable: op.billable,
                 };
                 if (op.projectId !== undefined) {
                     startBody.project_id = op.projectId;
@@ -1255,7 +1239,6 @@ export default class TogglSyncPlugin extends Plugin {
                     start: op.start,
                     duration: op.durationSeconds,
                     created_with: "siyuan-toggl-sync",
-                    billable: op.billable,
                     stop: stop.toISOString(),
                 };
                 if (op.projectId !== undefined) {
@@ -1567,6 +1550,29 @@ export default class TogglSyncPlugin extends Plugin {
         }
     }
 
+    private async syncFieldOptions(fieldAliases: string[], newNames: string[]): Promise<void> {
+        if (newNames.length === 0) return;
+        const database = await this.getTargetDatabase();
+        if (!database) return;
+
+        const key = this.findKey(database.keys, fieldAliases);
+        if (!key) return;
+
+        const freshKeys = await this.loadDatabaseKeys(database.avId);
+        const freshKey = freshKeys.find((k) => k.id === key.id);
+        const existing = (freshKey?.options || []).map((o) => o.name);
+        const missing = newNames.filter((name) => name && existing.indexOf(name) === -1);
+        if (missing.length === 0) return;
+
+        const blocksValues = missing.map((name) => [
+            {keyID: key.id, type: key.type, mSelect: [{content: name, color: ""}]},
+        ]);
+        await fetchSyncPost("/api/av/appendAttributeViewDetachedBlocksWithValues", {
+            avID: database.avId,
+            blocksValues,
+        });
+    }
+
     private async loadDatabaseKeys(avId: string): Promise<AttributeViewKey[]> {
         const keysResult = await fetchSyncPost("/api/av/getAttributeViewKeysByAvID", {avID: avId});
         let keys = keysResult.code === 0 ? this.normalizeAttributeViewKeys(keysResult.data) : [];
@@ -1703,7 +1709,6 @@ export default class TogglSyncPlugin extends Plugin {
             {aliases: ["同步状态", "Sync Status"], value: row.syncStatus || "正常"},
             {aliases: ["开始", "开始时间", "Start", "Start Time"], value: row.start},
             {aliases: ["结束", "结束时间", "End", "End Time", "Stop", "Stop Time"], value: row.stop},
-            {aliases: ["计费", "可计费", "Billable"], value: row.billable},
             {aliases: ["时长", "Duration"], value: row.durationSeconds},
             {aliases: ["TogglID", "Toggl ID", "Toggl Id", "toggl-id"], value: row.id},
             {aliases: ["日期", "创建日期", "Date"], value: row.start},
@@ -1935,6 +1940,7 @@ export default class TogglSyncPlugin extends Plugin {
             this.projects.set(p.id, p.name);
         }
         await this.saveConfig();
+        await this.syncFieldOptions(["项目", "Project"], Array.from(this.projects.values()));
         showMessage(`已刷新 Toggl 项目列表: ${this.projects.size} 个${this.formatQuotaText(res)}`, 3000, "info");
     }
 
@@ -1957,6 +1963,7 @@ export default class TogglSyncPlugin extends Plugin {
             }));
         this.loadTagCache();
         await this.saveConfig();
+        await this.syncFieldOptions(["标签", "Tags", "Tag"], this.tags);
         showMessage(`已刷新 Toggl 标签列表: ${this.tags.length} 个${this.formatQuotaText(res)}`, 3000, "info");
     }
 
@@ -2138,7 +2145,6 @@ export default class TogglSyncPlugin extends Plugin {
             stop: stop ? stop.toISOString() : undefined,
             duration: duration > 0 ? duration : -1,
             created_with: "siyuan-toggl-sync",
-            billable: row.billable,
         };
         const projectId = this.findProjectIdByName(row.projectName);
         if (projectId !== undefined) {
@@ -2161,7 +2167,6 @@ export default class TogglSyncPlugin extends Plugin {
             start: row.start.toISOString(),
             stop: stop ? stop.toISOString() : null,
             duration: duration > 0 ? duration : -1,
-            billable: row.billable,
         };
         const projectId = this.findProjectIdByName(row.projectName);
         if (projectId !== undefined) {
