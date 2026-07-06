@@ -1,8 +1,30 @@
 # Changelog
 
+## v0.2.6 — 2026-07-06
+
+### 修复：同步状态选项（最终版）
+
+* **根本原因**：`setAttributeViewBlockAttr` 不会把 select 选项注册到 `key.Options`（思源 kernel 源码验证）。
+* **修复**：改用 `appendAttributeViewDetachedBlocksWithValues` API，此 API 在 kernel 源码中确认会调用 `key.Options = append()` 注册选项。
+* 引入 `statusOptionsVersion` 版本号 + `PluginConfig.statusOptionsVersion` 类型化。
+
+### 优化：开始计时后台上传
+
+* 点「开始」后立即写入本地并关闭弹窗，Toggl API 在后台异步推送，不阻塞 UI。
+* API 失败时本地行保持「本地待上传」，下次同步自动推送。
+
+### 新增：诊断面板
+
+* 设置页底部新增「诊断」区域：网络连接诊断 + 数据库状态查看 + 一键复制。
+
+### 修复：版本号
+
+* `PLUGIN_VERSION` / `plugin.json` / `package.json` 统一为 0.2.6。
+* 移除 `SKIP_TOGGL_API` 死代码、`console.log` 改为 `console.warn`。
+
 ## v0.2.5 — 2026-07-06
 
-### 修复：同步状态选项缺失
+### 修复：同步状态选项缺失（未解决，被 v0.2.6 修复）
 
 * **根本原因**：`ensureSyncStatusOptions` 对同一行连续写入 7 个单选值，每次覆盖前一次，最终只剩"失败"；删除种子行后选项全部消失。
 * **修复**：改为每个状态值创建独立的种子行（7 行各写 1 次），确保每个选项都被注册到 `key.Options`。

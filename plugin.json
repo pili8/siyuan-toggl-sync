@@ -2,7 +2,7 @@
   "name": "siyuan-toggl-sync",
   "author": "gm",
   "url": "https://github.com/pili8/siyuan-toggl-sync",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "minAppVersion": "3.7.0",
   "backends": ["windows", "linux", "darwin", "docker"],
   "frontends": ["desktop", "browser-desktop"],

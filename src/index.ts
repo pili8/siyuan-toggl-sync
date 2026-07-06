@@ -52,7 +52,7 @@ const DEFAULT_CONFIG: PluginConfig = {
 };
 
 const CONFIG_FILE = "toggl-sync.json";
-const PLUGIN_VERSION = "0.2.6";
+const PLUGIN_VERSION = "0.2.7";
 
 type AttributeViewKey = {
     id: string;
@@ -468,6 +468,7 @@ export default class TogglSyncPlugin extends Plugin {
                         <div class="toggl-sync__settings-button-row">
                             <button id="ts-diag" class="b3-button b3-button--outline" type="button">网络连接</button>
                             <button id="ts-debug" class="b3-button b3-button--outline" type="button">数据库状态</button>
+                            <button id="ts-repair-options" class="b3-button b3-button--outline" type="button">修复选项</button>
                             <button id="ts-debug-copy" class="b3-button b3-button--text" type="button" style="display:none;font-size:12px;">📋 复制</button>
                         </div>
                         <div id="ts-debug-result" class="toggl-sync__settings-desc" style="margin-top:6px;white-space:pre-line;font-family:monospace;font-size:11px;max-height:400px;overflow-y:auto;"></div>
@@ -623,6 +624,31 @@ export default class TogglSyncPlugin extends Plugin {
             }).catch(() => {
                 showMessage("复制失败，请手动复制", 2000, "error");
             });
+        });
+
+        el.querySelector("#ts-repair-options")!.addEventListener("click", async () => {
+            const btn = el.querySelector("#ts-repair-options") as HTMLButtonElement;
+            btn.disabled = true;
+            btn.textContent = "修复中...";
+            try {
+                const database = await this.getTargetDatabase();
+                if (!database) {
+                    showMessage("未找到目标数据库", 4000, "error");
+                    return;
+                }
+                // 强制重置状态，绕过版本检查
+                this.config.statusOptionsPreparedAvId = "";
+                delete this.config.statusOptionsVersion;
+                await this.saveConfig();
+                // 重新加载 keys（avId 没变，需重新获取）
+                await this.ensureSyncStatusOptions(database);
+                showMessage("选项修复完成，请点「数据库状态」查看结果", 3000, "info");
+            } catch (e: any) {
+                showMessage(`修复失败: ${e?.message || String(e)}`, 5000, "error");
+            } finally {
+                btn.disabled = false;
+                btn.textContent = "修复选项";
+            }
         });
 
         el.querySelector("#ts-create-db").addEventListener("click", async () => {
@@ -1468,10 +1494,27 @@ export default class TogglSyncPlugin extends Plugin {
     }
 
     private async ensureSyncStatusOptions(database: TargetDatabase): Promise<void> {
-        const OPTIONS_PREPARED_VERSION = 4;
+        const OPTIONS_PREPARED_VERSION = 5;
         if (this.config.statusOptionsPreparedAvId === database.avId
             && this.config.statusOptionsVersion === OPTIONS_PREPARED_VERSION) return;
 
+        await this.syncStatusOptionsForce(database);
+
+        // 验证注册结果，成功才保存版本号
+        const verifyKeys = await this.loadDatabaseKeys(database.avId);
+        const verifyKey = verifyKeys.find((k) => k.id === this.findKey(database.keys, ["同步状态", "Sync Status"])!.id);
+        const verifyOptions = (verifyKey?.options || []).map((o) => o.name);
+        const stillMissing = SYNC_STATUS_OPTIONS.filter((s) => verifyOptions.indexOf(s) === -1);
+        if (stillMissing.length === 0) {
+            this.config.statusOptionsPreparedAvId = database.avId;
+            this.config.statusOptionsVersion = OPTIONS_PREPARED_VERSION;
+            await this.saveConfig();
+        } else {
+            console.warn(`[TogglSync] 选项注册失败，仍有 ${stillMissing.length} 个缺失: ${stillMissing.join(", ")}`);
+        }
+    }
+
+    private async syncStatusOptionsForce(database: TargetDatabase): Promise<void> {
         const key = this.findKey(database.keys, ["同步状态", "Sync Status"]);
         if (!key) return;
 
@@ -1479,16 +1522,8 @@ export default class TogglSyncPlugin extends Plugin {
         const freshKey = freshKeys.find((k) => k.id === key.id);
         const existingOptions = (freshKey?.options || []).map((o) => o.name);
         const missingOptions = SYNC_STATUS_OPTIONS.filter((s) => existingOptions.indexOf(s) === -1);
-        if (missingOptions.length === 0) {
-            this.config.statusOptionsPreparedAvId = database.avId;
-            this.config.statusOptionsVersion = OPTIONS_PREPARED_VERSION;
-            await this.saveConfig();
-            return;
-        }
+        if (missingOptions.length === 0) return;
 
-        // 注册缺失的 select 选项
-        // Kernel 源码确认：appendAttributeViewDetachedBlocksWithValues 会注册选项到 key.Options
-        // 如果该 API 失败（前端崩溃），回退到 setAttributeViewBlockAttr + 保留种子行
         const blocksValues = missingOptions.map((status) => [
             {keyID: key.id, type: "select", mSelect: [{content: status, color: ""}]},
         ]);
@@ -1507,7 +1542,6 @@ export default class TogglSyncPlugin extends Plugin {
                 }]);
             }
         } else {
-            // 回退方案：创建种子行并保留（标记同步状态，但不删除）
             for (const status of missingOptions) {
                 const rowId = await this.insertDatabaseRow(database.avId);
                 if (!rowId) continue;
@@ -1519,10 +1553,6 @@ export default class TogglSyncPlugin extends Plugin {
             }
             await new Promise((resolve) => setTimeout(resolve, 600));
         }
-
-        this.config.statusOptionsPreparedAvId = database.avId;
-        this.config.statusOptionsVersion = OPTIONS_PREPARED_VERSION;
-        await this.saveConfig();
     }
 
     private async loadDatabaseKeys(avId: string): Promise<AttributeViewKey[]> {
