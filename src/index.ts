@@ -2047,7 +2047,8 @@ export default class TogglSyncPlugin extends Plugin {
                     result.failed++;
                     continue;
                 }
-                await this.writeTogglRow(database, row.rowId, this.toDatabaseRow(response.data, "正常"));
+                await this.writeTogglId(database, row.rowId, response.data.id);
+                await this.writeSyncStatus(database, row.rowId, "正常");
                 result.created++;
                 continue;
             }
@@ -2948,7 +2949,6 @@ export default class TogglSyncPlugin extends Plugin {
             } else {
                 if (!silent) showMessage(`当前没有正在运行的 Toggl 计时${this.formatQuotaText(res)}`, 3000, "info");
             }
-            if (!silent) showMessage(`当前没有正在运行的 Toggl 计时${this.formatQuotaText(res)}`, 3000, "info");
         } else {
             if (!silent) showMessage(this.formatApiError("刷新当前 Toggl 计时失败", res), 5000, "error");
         }
