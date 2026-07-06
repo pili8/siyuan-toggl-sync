@@ -52,7 +52,7 @@ const DEFAULT_CONFIG: PluginConfig = {
 };
 
 const CONFIG_FILE = "toggl-sync.json";
-const PLUGIN_VERSION = "0.3.0";
+const PLUGIN_VERSION = "0.3.1";
 
 type AttributeViewKey = {
     id: string;
@@ -1020,9 +1020,10 @@ export default class TogglSyncPlugin extends Plugin {
                 return;
             }
 
-            // 成功：更新本地行（写入真实 toggl ID）和计时器状态
+            // 成功：只更新 togglId 和同步状态，不覆盖本地已设置的项目/标签
             if (database && localRowId) {
-                await this.writeTogglRow(database, localRowId, this.toDatabaseRow(response.data, "正常"));
+                await this.writeTogglId(database, localRowId, response.data.id);
+                await this.writeSyncStatus(database, localRowId, "正常");
             }
             await this.updateCurrentTimerFromEntry(response.data, input.projectId, input.tags);
         })().catch((e) => {
@@ -1106,7 +1107,8 @@ export default class TogglSyncPlugin extends Plugin {
             }
 
             if (database && seedRowId) {
-                await this.writeTogglRow(database, seedRowId, this.toDatabaseRow(response.data, "正常"));
+                await this.writeTogglId(database, seedRowId, response.data.id);
+                await this.writeSyncStatus(database, seedRowId, "正常");
             } else if (database) {
                 await this.addEntries([response.data], database);
             }
@@ -1738,6 +1740,16 @@ export default class TogglSyncPlugin extends Plugin {
                 writtenKeyIds.add(key.id);
             }
         }
+    }
+
+    private async writeTogglId(database: TargetDatabase, rowId: string, togglId: number): Promise<void> {
+        const key = this.findKey(database.keys, ["TogglID", "Toggl ID", "Toggl Id", "toggl-id"]);
+        if (!key) return;
+        const value = this.buildCellValue(key, rowId, togglId);
+        if (!value) return;
+        await fetchSyncPost("/api/av/setAttributeViewBlockAttr", {
+            avID: database.avId, keyID: key.id, itemID: rowId, value,
+        });
     }
 
     private async writeSyncStatus(database: TargetDatabase, rowId: string, status: SyncStatus): Promise<void> {
