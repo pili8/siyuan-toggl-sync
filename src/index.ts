@@ -1742,7 +1742,9 @@ export default class TogglSyncPlugin extends Plugin {
             if (!key && field.usePrimary) {
                 key = this.findPrimaryTextKey(database.keys);
             }
-            if (!key || writtenKeyIds.has(key.id) || this.isEmptyCellInput(field.value)) continue;
+            if (!key || writtenKeyIds.has(key.id)) continue;
+            // select/mSelect 空值也需显式写入 {mSelect:[]} 来清除思源默认选项
+            if (this.isEmptyCellInput(field.value) && key.type !== "select" && key.type !== "mSelect") continue;
 
             const value = this.buildCellValue(key, rowId, field.value);
             if (!value) continue;
