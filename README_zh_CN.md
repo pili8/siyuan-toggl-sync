@@ -126,6 +126,30 @@ Toggl API 文档：
 - [Time entries API](https://engineering.toggl.com/docs/track/api/time_entries/)
 - [API rate limits](https://engineering.toggl.com/docs/track/)
 
+## 开发注意事项
+
+以下是在开发过程中踩过的坑，后续修改相关逻辑时务必注意：
+
+### select/mSelect 字段必须显式写入空值
+
+`writeTogglRow` 对空字符串/空数组会调用 `isEmptyCellInput` 跳过写入。但对 `select` 和 `mSelect` 类型字段**不能跳过**，必须显式写入 `{mSelect: []}`。
+
+**原因**：思源 `insertAttrViewBlock` 创建新行时，会自动从 `key.Options` 取第一个选项作为 select/mSelect 字段的默认值。如果写入时跳过空值，这个默认选项会永远残留，导致用户没选项目/标签却出现了项目/标签。
+
+```typescript
+// ❌ 错误：select/mSelect 空值被跳过
+if (isEmptyCellInput(field.value)) continue;
+
+// ✅ 正确：select/mSelect 空值也写入 {mSelect: []}
+if (isEmptyCellInput(field.value) && key.type !== "select" && key.type !== "mSelect") continue;
+```
+
+### API 回写不要覆盖整行
+
+`pushTimerToToggl` / `pushManualToToggl` / `pushLocalChanges` 在 Toggl API 成功后，**不要**用 `toDatabaseRow(response.data)` 覆盖整行。Toggl 返回的 response 可能包含 workspace 默认的项目/标签。
+
+改为只写入 `TogglID` 和 `同步状态`，使用 `writeTogglId` + `writeSyncStatus`。
+
 ## 开发
 
 ```bash
