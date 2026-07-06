@@ -1386,25 +1386,34 @@ export default class TogglSyncPlugin extends Plugin {
     }
 
     private async ensureSyncStatusOptions(database: TargetDatabase): Promise<void> {
-        if (this.config.statusOptionsPreparedAvId === database.avId) return;
+        // 版本号：v2 修复了"同一行写 7 次单选值"的 Bug，老数据库需重新执行
+        const OPTIONS_PREPARED_VERSION = 2;
+        if (this.config.statusOptionsPreparedAvId === database.avId
+            && (this.config as any).statusOptionsVersion === OPTIONS_PREPARED_VERSION) return;
 
         const key = this.findKey(database.keys, ["同步状态", "Sync Status"]);
         if (!key) return;
 
-        // 如果已有含同步状态值的行，说明选项已存在，跳过
-        const rows = await this.readLocalDatabaseRows(database);
-        const hasOptions = rows.some((row) => row.syncStatus && row.syncStatus.trim());
-        if (hasOptions) {
+        // 先检查 key 是否已配置全部选项（思源 3.x select 选项持久化在 key.Options）
+        const freshKeys = await this.loadDatabaseKeys(database.avId);
+        const freshKey = freshKeys.find((k) => k.id === key.id);
+        const existingOptions = (freshKey?.options || []).map((o) => o.name);
+        const missingOptions = SYNC_STATUS_OPTIONS.filter((s) => existingOptions.indexOf(s) === -1);
+        if (missingOptions.length === 0) {
             this.config.statusOptionsPreparedAvId = database.avId;
+            (this.config as any).statusOptionsVersion = OPTIONS_PREPARED_VERSION;
             await this.saveConfig();
             return;
         }
 
-        // 种子行：逐个写入全部状态值，填充 select 下拉选项
-        const rowId = await this.insertDatabaseRow(database.avId);
-        if (!rowId) return;
+        // 种子行：每个缺失的状态值创建一行，确保每个选项都被注册到 key.Options
+        // 单选字段一行只能有一个值，必须分散到多行
+        const seedRowIds: string[] = [];
+        for (const status of missingOptions) {
+            const rowId = await this.insertDatabaseRow(database.avId);
+            if (!rowId) continue;
+            seedRowIds.push(rowId);
 
-        for (const status of SYNC_STATUS_OPTIONS) {
             const value = this.buildCellValue(key, rowId, status);
             if (!value) continue;
             await fetchSyncPost("/api/av/setAttributeViewBlockAttr", {
@@ -1415,15 +1424,21 @@ export default class TogglSyncPlugin extends Plugin {
             });
         }
 
-        // 清理种子行
-        await this.requestTransaction([{
-            action: "removeAttrViewBlock",
-            avID: database.avId,
-            srcIDs: [rowId],
-            removeDest: true,
-        }]);
+        // 等待思源将选项注册到 key.Options
+        await new Promise((resolve) => setTimeout(resolve, 600));
+
+        // 清理种子行（选项已持久化到 key.Options，删除行不影响）
+        if (seedRowIds.length > 0) {
+            await this.requestTransaction([{
+                action: "removeAttrViewBlock",
+                avID: database.avId,
+                srcIDs: seedRowIds,
+                removeDest: true,
+            }]);
+        }
 
         this.config.statusOptionsPreparedAvId = database.avId;
+        (this.config as any).statusOptionsVersion = OPTIONS_PREPARED_VERSION;
         await this.saveConfig();
     }
 

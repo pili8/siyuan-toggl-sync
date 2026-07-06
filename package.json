@@ -1,6 +1,6 @@
 {
   "name": "siyuan-toggl-sync",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Sync Toggl time entries to SiYuan database",
   "main": ".src/index.js",
   "scripts": {
