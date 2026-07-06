@@ -1057,7 +1057,7 @@ export default class TogglSyncPlugin extends Plugin {
             return false;
         }
 
-        // 先在思源写入一行，状态标记为「本地待上传」
+        // ① 先写入本地数据库
         const database = await this.getTargetDatabase();
         let seedRowId: string | null = null;
         if (database) {
@@ -1080,42 +1080,54 @@ export default class TogglSyncPlugin extends Plugin {
             }
         }
 
-        // 尝试推送到 Toggl
-        const workspaceId = await this.ensureWorkspaceId();
-        if (!workspaceId) return true; // 已写入本地，等下次同步推送
+        // ② 后台上传 Toggl（不阻塞弹窗关闭）
+        this.pushManualToToggl({input, database, seedRowId});
 
-        const stop = new Date(input.start.getTime() + input.durationSeconds * 1000);
-        const manualBody: any = {
-            workspace_id: workspaceId,
-            description: input.description || "无描述",
-            start: input.start.toISOString(),
-            stop: stop.toISOString(),
-            duration: input.durationSeconds,
-            created_with: "siyuan-toggl-sync",
-            billable: input.billable,
-        };
-        if (input.projectId !== undefined) {
-            manualBody.project_id = input.projectId;
-        }
-        if (input.tags.length > 0) {
-            manualBody.tags = input.tags;
-            manualBody.tag_action = "add";
-        }
-        const response = await togglApi.createTimeEntry(workspaceId, manualBody);
-
-        if (!response.ok) {
-            showMessage("已写入本地（待下次同步上传）", 3000, "info");
-            return true;
-        }
-
-        // API 成功后更新本地行
-        if (database && seedRowId) {
-            await this.writeTogglRow(database, seedRowId, this.toDatabaseRow(response.data, "正常"));
-        } else if (database) {
-            await this.addEntries([response.data], database);
-        }
-        showMessage("Toggl 条目已补录", 2000, "info");
         return true;
+    }
+
+    private pushManualToToggl(params: {
+        input: {description: string; start: Date; durationSeconds: number; projectId?: number; tags: string[]; billable: boolean};
+        database: TargetDatabase | null;
+        seedRowId: string | null;
+    }) {
+        const {input, database, seedRowId} = params;
+        (async () => {
+            const workspaceId = await this.ensureWorkspaceId();
+            if (!workspaceId) return;
+
+            const stop = new Date(input.start.getTime() + input.durationSeconds * 1000);
+            const manualBody: any = {
+                workspace_id: workspaceId,
+                description: input.description || "无描述",
+                start: input.start.toISOString(),
+                stop: stop.toISOString(),
+                duration: input.durationSeconds,
+                created_with: "siyuan-toggl-sync",
+                billable: input.billable,
+            };
+            if (input.projectId !== undefined) {
+                manualBody.project_id = input.projectId;
+            }
+            if (input.tags.length > 0) {
+                manualBody.tags = input.tags;
+                manualBody.tag_action = "add";
+            }
+            const response = await togglApi.createTimeEntry(workspaceId, manualBody);
+
+            if (!response.ok) {
+                showMessage("上传 Toggl 失败，已保留本地记录", 3000, "error");
+                return;
+            }
+
+            if (database && seedRowId) {
+                await this.writeTogglRow(database, seedRowId, this.toDatabaseRow(response.data, "正常"));
+            } else if (database) {
+                await this.addEntries([response.data], database);
+            }
+        })().catch((e) => {
+            console.warn("[TogglSync] pushManualToToggl failed:", e);
+        });
     }
 
     private async stopCurrentTimer() {
