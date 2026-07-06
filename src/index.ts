@@ -2171,8 +2171,11 @@ export default class TogglSyncPlugin extends Plugin {
 
     private buildCreateInputFromLocalRow(row: LocalDatabaseRow, workspaceId: number): CreateTimeEntryInput | null {
         if (!row.start) return null;
-        const duration = this.resolveDurationSeconds(row);
-        const stop = row.stop ?? (duration > 0 ? new Date(row.start.getTime() + duration * 1000) : null);
+        const stop = row.stop ?? null;
+        // Toggl 要求 stop - start (秒) === duration，用 stop 反算保证一致
+        const duration = stop
+            ? Math.round((stop.getTime() - row.start.getTime()) / 1000)
+            : (row.durationSeconds > 0 ? row.durationSeconds : -1);
         const input: CreateTimeEntryInput = {
             workspace_id: workspaceId,
             description: row.description || "无描述",
@@ -2194,8 +2197,10 @@ export default class TogglSyncPlugin extends Plugin {
 
     private buildUpdateInputFromLocalRow(row: LocalDatabaseRow, workspaceId: number): UpdateTimeEntryInput | null {
         if (!row.start) return null;
-        const duration = this.resolveDurationSeconds(row);
-        const stop = row.stop ?? (duration > 0 ? new Date(row.start.getTime() + duration * 1000) : null);
+        const stop = row.stop ?? null;
+        const duration = stop
+            ? Math.round((stop.getTime() - row.start.getTime()) / 1000)
+            : (row.durationSeconds > 0 ? row.durationSeconds : -1);
         const input: UpdateTimeEntryInput = {
             workspace_id: workspaceId,
             description: row.description || "无描述",
