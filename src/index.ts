@@ -31,6 +31,7 @@ interface PluginConfig {
     pendingOps: PendingOp[];
     avId?: string;
     statusOptionsPreparedAvId?: string;
+    statusOptionsVersion?: number;
     lastProjectId?: number;
     lastTags?: string[];
 }
@@ -51,7 +52,7 @@ const DEFAULT_CONFIG: PluginConfig = {
 };
 
 const CONFIG_FILE = "toggl-sync.json";
-const PLUGIN_VERSION = "0.2.3";
+const PLUGIN_VERSION = "0.2.6";
 
 type AttributeViewKey = {
     id: string;
@@ -459,9 +460,17 @@ export default class TogglSyncPlugin extends Plugin {
                         </div>
                         <div class="toggl-sync__settings-desc">目标文档为空时，请先手动新建数据库；同步不会自动创建。</div>
                     </div>
+                </div>
+
+                <div class="toggl-sync__settings-section">
+                    <div class="toggl-sync__settings-section-title">诊断</div>
                     <div class="toggl-sync__settings-field">
-                        <button id="ts-diag" class="b3-button b3-button--outline" type="button" style="width:100%;">诊断网络连接</button>
-                        <div id="ts-diag-result" class="toggl-sync__settings-desc" style="margin-top:6px;white-space:pre-line;font-family:monospace;font-size:11px;"></div>
+                        <div class="toggl-sync__settings-button-row">
+                            <button id="ts-diag" class="b3-button b3-button--outline" type="button">网络连接</button>
+                            <button id="ts-debug" class="b3-button b3-button--outline" type="button">数据库状态</button>
+                            <button id="ts-debug-copy" class="b3-button b3-button--text" type="button" style="display:none;font-size:12px;">📋 复制</button>
+                        </div>
+                        <div id="ts-debug-result" class="toggl-sync__settings-desc" style="margin-top:6px;white-space:pre-line;font-family:monospace;font-size:11px;max-height:400px;overflow-y:auto;"></div>
                     </div>
                 </div>
             </div>
@@ -541,21 +550,79 @@ export default class TogglSyncPlugin extends Plugin {
             );
         });
 
-        el.querySelector("#ts-diag").addEventListener("click", async () => {
+        const diagResultEl = el.querySelector("#ts-debug-result") as HTMLElement;
+        const diagCopyBtn = el.querySelector("#ts-debug-copy") as HTMLButtonElement;
+        let diagResultText = "";
+
+        const setDiagResult = (text: string) => {
+            diagResultText = text;
+            diagResultEl.textContent = text;
+            diagCopyBtn.style.display = text ? "inline-block" : "none";
+        };
+
+        el.querySelector("#ts-diag")!.addEventListener("click", async () => {
             const btn = el.querySelector("#ts-diag") as HTMLButtonElement;
-            const resultEl = el.querySelector("#ts-diag-result") as HTMLElement;
             btn.disabled = true;
             btn.textContent = "诊断中...";
-            resultEl.textContent = "";
+            setDiagResult("");
             try {
                 const results = await togglApi.runDiagnostics();
-                resultEl.textContent = results.map((r) => `${r.ok ? "✅" : "❌"} ${r.label}: ${r.detail}`).join("\n");
+                setDiagResult(results.map((r) => `${r.ok ? "✅" : "❌"} ${r.label}: ${r.detail}`).join("\n"));
             } catch (e: any) {
-                resultEl.textContent = `❌ 诊断异常: ${e?.message || String(e)}`;
+                setDiagResult(`❌ 诊断异常: ${e?.message || String(e)}`);
             } finally {
                 btn.disabled = false;
-                btn.textContent = "诊断网络连接";
+                btn.textContent = "网络连接";
             }
+        });
+
+        el.querySelector("#ts-debug")!.addEventListener("click", async () => {
+            const btn = el.querySelector("#ts-debug") as HTMLButtonElement;
+            btn.disabled = true;
+            btn.textContent = "诊断中...";
+            const lines: string[] = [];
+            const append = (s: string) => { lines.push(s); setDiagResult(lines.join("\n")); };
+
+            try {
+                append("=== 数据库状态 ===");
+                const database = await this.getTargetDatabase();
+                if (!database) {
+                    append("❌ 未找到目标数据库");
+                    return;
+                }
+                append(`avId: ${database.avId}`);
+                append(`字段: ${database.keys.map((k) => `${k.name}(${k.type})`).join(", ")}`);
+                append(`数据行数: ${(await this.readLocalDatabaseRows(database)).length}`);
+
+                append("\n=== 同步状态选项 ===");
+                const syncKey = this.findKey(database.keys, ["同步状态", "Sync Status"]);
+                if (!syncKey) { append("❌ 未找到「同步状态」字段"); return; }
+                const freshKeys = await this.loadDatabaseKeys(database.avId);
+                const freshKey = freshKeys.find((k) => k.id === syncKey.id);
+                const opts = freshKey?.options || [];
+                const missing = SYNC_STATUS_OPTIONS.filter((s) => opts.map((o) => o.name).indexOf(s) === -1);
+                append(`key.Options(${opts.length}): ${opts.map((o) => o.name).join(", ") || "(空)"}`);
+                append(`预期 ${SYNC_STATUS_OPTIONS.length} 个, 缺失 ${missing.length} 个${missing.length > 0 ? ": " + missing.join(", ") : ""}`);
+                append(missing.length === 0 ? "✅ 选项完整" : "⚠️ 选项不完整，需要重新创建数据库");
+
+                append("\n=== 运行状态 ===");
+                append(`currentTimer: ${this.config.currentTimer ? "有 (" + this.config.currentTimer.description + ")" : "无"}`);
+                append(`pendingOps: ${this.config.pendingOps.length} 条`);
+                append(`lastSyncTime: ${this.config.lastSyncTime || "(从未同步)"}`);
+            } catch (e: any) {
+                append(`\n❌ 异常: ${e?.message || String(e)}`);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = "数据库状态";
+            }
+        });
+
+        diagCopyBtn.addEventListener("click", () => {
+            navigator.clipboard.writeText(diagResultText).then(() => {
+                showMessage("已复制诊断信息", 1500, "info");
+            }).catch(() => {
+                showMessage("复制失败，请手动复制", 2000, "error");
+            });
         });
 
         el.querySelector("#ts-create-db").addEventListener("click", async () => {
@@ -901,40 +968,54 @@ export default class TogglSyncPlugin extends Plugin {
             databaseAvId: database?.avId,
         };
 
-        // ③ 尝试推送到 Toggl
-        const createBody: any = {
-            workspace_id: workspaceId,
-            description: input.description || "无描述",
-            start: start.toISOString(),
-            duration: -1,
-            created_with: "siyuan-toggl-sync",
-            billable: input.billable,
-        };
-        if (input.projectId !== undefined) {
-            createBody.project_id = input.projectId;
-        }
-        if (input.tags.length > 0) {
-            createBody.tags = input.tags;
-            createBody.tag_action = "add";
-        }
-        const response = await togglApi.createTimeEntry(workspaceId, createBody);
+        // ③ 后台上传 Toggl（不阻塞弹窗关闭）
+        this.pushTimerToToggl({
+            workspaceId, input, start, database, localRowId,
+        });
 
-        if (!response.ok) {
-            // API 失败，本地已写入，等下次同步通过 pushLocalChanges 推送
-            await this.saveConfig();
-            showMessage("已开始本地计时（待下次同步上传）", 3000, "info");
-            return true;
-        }
-
-        // ④ API 成功：更新本地行（写入真实 toggl ID）
-        if (database && localRowId) {
-            await this.writeTogglRow(database, localRowId, this.toDatabaseRow(response.data, "正常"));
-        }
-
-        // ⑤ 更新计时器状态为真实 toggl ID
-        await this.updateCurrentTimerFromEntry(response.data, input.projectId, input.tags);
-        showMessage("Toggl 计时已开始", 2000, "info");
         return true;
+    }
+
+    private pushTimerToToggl(params: {
+        workspaceId: number;
+        input: {description: string; projectId?: number; tags: string[]; billable: boolean};
+        start: Date;
+        database: TargetDatabase | null;
+        localRowId: string | null;
+    }) {
+        const {workspaceId, input, start, database, localRowId} = params;
+        (async () => {
+            const createBody: any = {
+                workspace_id: workspaceId,
+                description: input.description || "无描述",
+                start: start.toISOString(),
+                duration: -1,
+                created_with: "siyuan-toggl-sync",
+                billable: input.billable,
+            };
+            if (input.projectId !== undefined) {
+                createBody.project_id = input.projectId;
+            }
+            if (input.tags.length > 0) {
+                createBody.tags = input.tags;
+                createBody.tag_action = "add";
+            }
+            const response = await togglApi.createTimeEntry(workspaceId, createBody);
+
+            if (!response.ok) {
+                // 失败：本地行保持"本地待上传"，下次同步推送
+                showMessage("上传 Toggl 失败，已保留本地记录", 3000, "error");
+                return;
+            }
+
+            // 成功：更新本地行（写入真实 toggl ID）和计时器状态
+            if (database && localRowId) {
+                await this.writeTogglRow(database, localRowId, this.toDatabaseRow(response.data, "正常"));
+            }
+            await this.updateCurrentTimerFromEntry(response.data, input.projectId, input.tags);
+        })().catch((e) => {
+            console.warn("[TogglSync] pushTimerToToggl failed:", e);
+        });
     }
 
     private async createManualTogglEntry(input: {
@@ -1176,6 +1257,7 @@ export default class TogglSyncPlugin extends Plugin {
         if (this.config.avId !== avId) {
             this.config.avId = avId;
             this.config.statusOptionsPreparedAvId = "";
+            delete this.config.statusOptionsVersion;
             await this.saveConfig();
         }
 
@@ -1386,59 +1468,60 @@ export default class TogglSyncPlugin extends Plugin {
     }
 
     private async ensureSyncStatusOptions(database: TargetDatabase): Promise<void> {
-        // 版本号：v2 修复了"同一行写 7 次单选值"的 Bug，老数据库需重新执行
-        const OPTIONS_PREPARED_VERSION = 2;
+        const OPTIONS_PREPARED_VERSION = 4;
         if (this.config.statusOptionsPreparedAvId === database.avId
-            && (this.config as any).statusOptionsVersion === OPTIONS_PREPARED_VERSION) return;
+            && this.config.statusOptionsVersion === OPTIONS_PREPARED_VERSION) return;
 
         const key = this.findKey(database.keys, ["同步状态", "Sync Status"]);
         if (!key) return;
 
-        // 先检查 key 是否已配置全部选项（思源 3.x select 选项持久化在 key.Options）
         const freshKeys = await this.loadDatabaseKeys(database.avId);
         const freshKey = freshKeys.find((k) => k.id === key.id);
         const existingOptions = (freshKey?.options || []).map((o) => o.name);
         const missingOptions = SYNC_STATUS_OPTIONS.filter((s) => existingOptions.indexOf(s) === -1);
         if (missingOptions.length === 0) {
             this.config.statusOptionsPreparedAvId = database.avId;
-            (this.config as any).statusOptionsVersion = OPTIONS_PREPARED_VERSION;
+            this.config.statusOptionsVersion = OPTIONS_PREPARED_VERSION;
             await this.saveConfig();
             return;
         }
 
-        // 种子行：每个缺失的状态值创建一行，确保每个选项都被注册到 key.Options
-        // 单选字段一行只能有一个值，必须分散到多行
-        const seedRowIds: string[] = [];
-        for (const status of missingOptions) {
-            const rowId = await this.insertDatabaseRow(database.avId);
-            if (!rowId) continue;
-            seedRowIds.push(rowId);
+        // 注册缺失的 select 选项
+        // Kernel 源码确认：appendAttributeViewDetachedBlocksWithValues 会注册选项到 key.Options
+        // 如果该 API 失败（前端崩溃），回退到 setAttributeViewBlockAttr + 保留种子行
+        const blocksValues = missingOptions.map((status) => [
+            {keyID: key.id, type: "select", mSelect: [{content: status, color: ""}]},
+        ]);
+        const appendResult = await fetchSyncPost("/api/av/appendAttributeViewDetachedBlocksWithValues", {
+            avID: database.avId,
+            blocksValues,
+        });
 
-            const value = this.buildCellValue(key, rowId, status);
-            if (!value) continue;
-            await fetchSyncPost("/api/av/setAttributeViewBlockAttr", {
-                avID: database.avId,
-                keyID: key.id,
-                itemID: rowId,
-                value,
-            });
-        }
-
-        // 等待思源将选项注册到 key.Options
-        await new Promise((resolve) => setTimeout(resolve, 600));
-
-        // 清理种子行（选项已持久化到 key.Options，删除行不影响）
-        if (seedRowIds.length > 0) {
-            await this.requestTransaction([{
-                action: "removeAttrViewBlock",
-                avID: database.avId,
-                srcIDs: seedRowIds,
-                removeDest: true,
-            }]);
+        if (appendResult.code === 0) {
+            const blockIDs: string[] = appendResult.data?.blockIDs || [];
+            if (blockIDs.length > 0) {
+                await new Promise((resolve) => setTimeout(resolve, 600));
+                await this.requestTransaction([{
+                    action: "removeAttrViewBlock", avID: database.avId,
+                    srcIDs: blockIDs, removeDest: true,
+                }]);
+            }
+        } else {
+            // 回退方案：创建种子行并保留（标记同步状态，但不删除）
+            for (const status of missingOptions) {
+                const rowId = await this.insertDatabaseRow(database.avId);
+                if (!rowId) continue;
+                const value = this.buildCellValue(key, rowId, status);
+                if (!value) continue;
+                await fetchSyncPost("/api/av/setAttributeViewBlockAttr", {
+                    avID: database.avId, keyID: key.id, itemID: rowId, value,
+                });
+            }
+            await new Promise((resolve) => setTimeout(resolve, 600));
         }
 
         this.config.statusOptionsPreparedAvId = database.avId;
-        (this.config as any).statusOptionsVersion = OPTIONS_PREPARED_VERSION;
+        this.config.statusOptionsVersion = OPTIONS_PREPARED_VERSION;
         await this.saveConfig();
     }
 
@@ -1513,7 +1596,7 @@ export default class TogglSyncPlugin extends Plugin {
             }
         }
         if (removedCount > 0) {
-            console.log(`[TogglSync] removed ${removedCount} unwanted keys`);
+            console.warn(`[TogglSync] removed ${removedCount} unwanted keys`);
         }
     }
 
