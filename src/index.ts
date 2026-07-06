@@ -1558,16 +1558,25 @@ export default class TogglSyncPlugin extends Plugin {
                 }]);
             }
         } else {
+            const seedRowIds: string[] = [];
             for (const status of missingOptions) {
                 const rowId = await this.insertDatabaseRow(database.avId);
                 if (!rowId) continue;
+                seedRowIds.push(rowId);
                 const value = this.buildCellValue(key, rowId, status);
                 if (!value) continue;
                 await fetchSyncPost("/api/av/setAttributeViewBlockAttr", {
                     avID: database.avId, keyID: key.id, itemID: rowId, value,
                 });
             }
-            await new Promise((resolve) => setTimeout(resolve, 600));
+            // 清理种子行
+            if (seedRowIds.length > 0) {
+                await new Promise((resolve) => setTimeout(resolve, 600));
+                await this.requestTransaction([{
+                    action: "removeAttrViewBlock", avID: database.avId,
+                    srcIDs: seedRowIds, removeDest: true,
+                }]);
+            }
         }
     }
 
@@ -1588,10 +1597,18 @@ export default class TogglSyncPlugin extends Plugin {
         const blocksValues = missing.map((name) => [
             {keyID: key.id, type: key.type, mSelect: [{content: name, color: ""}]},
         ]);
-        await fetchSyncPost("/api/av/appendAttributeViewDetachedBlocksWithValues", {
+        const result = await fetchSyncPost("/api/av/appendAttributeViewDetachedBlocksWithValues", {
             avID: database.avId,
             blocksValues,
         });
+        // 清理种子块（选项已持久化到 key.Options，删除块不影响）
+        const blockIDs: string[] = result.code === 0 ? (result.data?.blockIDs || []) : [];
+        if (blockIDs.length > 0) {
+            await this.requestTransaction([{
+                action: "removeAttrViewBlock", avID: database.avId,
+                srcIDs: blockIDs, removeDest: true,
+            }]);
+        }
     }
 
     private async loadDatabaseKeys(avId: string): Promise<AttributeViewKey[]> {
