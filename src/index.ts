@@ -2923,7 +2923,14 @@ export default class TogglSyncPlugin extends Plugin {
             await this.updateCurrentTimerFromEntry(res.data as TimeEntry);
             if (!silent) showMessage(`已刷新当前 Toggl 计时${this.formatQuotaText(res)}`, 3000, "info");
         } else if (res.ok) {
-            await this.clearCurrentTimer();
+            // 云端无运行计时器，但本地还在跑：自动纠正状态栏
+            // 数据库行由 syncEntries 负责用 Toggl 实际数据更新（停止时间以云端为准）
+            if (this.config.currentTimer) {
+                await this.clearCurrentTimer();
+                if (!silent) showMessage("云端计时已停止，本地已同步", 3000, "info");
+            } else {
+                if (!silent) showMessage(`当前没有正在运行的 Toggl 计时${this.formatQuotaText(res)}`, 3000, "info");
+            }
             if (!silent) showMessage(`当前没有正在运行的 Toggl 计时${this.formatQuotaText(res)}`, 3000, "info");
         } else {
             if (!silent) showMessage(this.formatApiError("刷新当前 Toggl 计时失败", res), 5000, "error");
