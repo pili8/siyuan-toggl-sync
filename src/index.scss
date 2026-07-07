@@ -192,6 +192,91 @@
       gap: 8px;
       cursor: pointer;
     }
+
+    // 维护操作：带说明的卡片，目标更大、不易误点
+    &-action-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    &-action-card {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 2px;
+      text-align: left;
+      padding: 10px 12px;
+      border: 1px solid var(--b3-border-color);
+      border-radius: 6px;
+      background: var(--b3-theme-background);
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+
+      &:hover {
+        border-color: var(--b3-theme-primary);
+        background: var(--b3-theme-surface);
+      }
+    }
+
+    &-action-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--b3-theme-on-surface);
+    }
+
+    &-action-desc {
+      font-size: 11px;
+      line-height: 1.4;
+      color: var(--b3-theme-on-surface-light);
+    }
+
+    &-action-card--danger {
+      border-color: rgba(229, 57, 53, 0.35);
+
+      &:hover {
+        border-color: #e53935;
+        background: rgba(229, 57, 53, 0.06);
+      }
+
+      .toggl-sync__action-title {
+        color: #e53935;
+      }
+    }
+
+    // 清空同步时间：低调的文字按钮，避免与维护卡片混淆
+    &-link {
+      flex: 0 0 auto;
+      padding: 2px 4px;
+      font-size: 12px;
+      color: var(--b3-theme-on-surface-light);
+      text-decoration: underline;
+
+      &:hover {
+        color: #e53935;
+      }
+    }
+
+    // 诊断区降权：虚线边框 + 弱化，明确「仅排障用」
+    &-section--advanced {
+      border-style: dashed;
+      opacity: 0.94;
+    }
+
+    &-tag {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 1px 6px;
+      border-radius: 8px;
+      background: var(--b3-theme-on-surface-light);
+      color: var(--b3-theme-background);
+      letter-spacing: 0;
+      text-transform: none;
+      vertical-align: middle;
+      opacity: 0.7;
+      margin-left: 4px;
+    }
   }
 
   &__dialog-row {

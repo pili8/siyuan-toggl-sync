@@ -196,6 +196,21 @@ await Promise.all(writeTasks);
 
 `createTargetDatabaseFromSettings`（新建/重建库）里要把 `cachedDb` 置 `null` 失效，否则会读到旧结构。
 
+### 时长以「时长」字段为唯一真值，结束时间反算
+
+思源属性视图的「日期」类型**底层存毫秒时间戳、程序读写不丢秒**，但**显示/编辑只到分钟**（日期选择器最小粒度是分钟）。因此 sub-minute 条目（如 10 秒）一旦被手动改过日期、或结束时间落回同一分钟，就会出现「结束 − 开始 = 0 而时长 ≠ 0」。
+
+推送本地条目到 Toggl 时（`buildCreateInputFromLocalRow` / `buildUpdateInputFromLocalRow`）**不要**用 `结束 − 开始` 反算时长，否则会把时长误判成 0（又被当成「正在计时」`-1`）。
+
+正确做法：时长一律以数据库独立的数字字段「时长」为准（`resolveDurationSeconds` 优先返回它），结束时间由 `开始 + 时长` 反算，保证 `stop − start === duration`：
+
+```typescript
+const duration = this.resolveDurationSeconds(row); // 优先 row.durationSeconds
+const stop = duration > 0 ? new Date(row.start.getTime() + duration * 1000) : null;
+```
+
+本地库的「结束」日期列只是「何时」的近似展示（分钟级）；要看精确时长请认准「时长」数字列与「持续时间」文本列。
+
 ## 开发
 
 ```bash
