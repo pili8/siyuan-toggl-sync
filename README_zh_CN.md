@@ -150,6 +150,20 @@ if (isEmptyCellInput(field.value) && key.type !== "select" && key.type !== "mSel
 
 改为只写入 `TogglID` 和 `同步状态`，使用 `writeTogglId` + `writeSyncStatus`。
 
+### 重复 TogglID 必须检测，避免孤儿行
+
+`Map` 按 `togglId` 建索引时同 ID 后者覆盖前者，导致多出的行既不会被 `applyRemoteEntries` 更新，也不会被 `markMissingRowsInRepairRange` 标记删除，成为永久孤儿。
+
+读库后必须调用 `detectDuplicateTogglIds`：保留状态为「正常」（或数据最完整）的行，其余标「本地可删除」。并且 `applyRemoteEntries` 构建 `rowsByTogglId` 时要跳过 `syncStatus === "本地可删除"` 的行，否则保留行可能被错误覆盖。
+
+### 停止计时不要重复调云端 API
+
+`stopCurrentTimer` 的云端停止逻辑必须合并为一次：无本地行时直接 `stopTimeEntry`；有本地行时先 `getCurrentTimeEntry` 确认仍在运行再 `stopTimeEntry`。不要对同一个计时器既走「无本地行」分支又走「有本地行」分支，否则会重复消耗免费版配额。
+
+### 同步时不要每次刷新项目/标签
+
+`refreshProjects` / `refreshTags` 已加 10 分钟时间缓存（基于 `projectsRefreshedAt` / `tagsRefreshedAt`）。修改相关逻辑时保持「非 force 且缓存未过期则跳过」的判断，避免每次同步都拉 Toggl API 浪费配额。
+
 ## 开发
 
 ```bash
