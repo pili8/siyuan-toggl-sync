@@ -174,6 +174,28 @@ if (isEmptyCellInput(field.value) && key.type !== "select" && key.type !== "mSel
 
 `refreshProjects` / `refreshTags` 已加 10 分钟时间缓存（基于 `projectsRefreshedAt` / `tagsRefreshedAt`）。修改相关逻辑时保持「非 force 且缓存未过期则跳过」的判断，避免每次同步都拉 Toggl API 浪费配额。
 
+### 开始/补录弹窗关闭慢：本地写也要省 RPC
+
+弹窗关闭前必须「先写本地库再关」，但思源属性视图每写一格都是一次独立内核 RPC + 落盘。早期实现每次开始/补录都串行发约 17 条 RPC（`getTargetDatabase` 反复查库结构 + `writeTogglRow` 逐个字段 `await`），叠加成 2 秒多的关闭延迟。
+
+两个优化（缺一不可）：
+
+```typescript
+// ① getTargetDatabase 结果缓存：同一次使用内库结构不变，命中缓存直接返回
+if (this.cachedDb && this.cachedDbDocId === this.config.targetDocId
+    && this.cachedDbAvId === (this.config.avId || "")) return this.cachedDb;
+
+// ② writeTogglRow 并行写各字段，而非在 for 循环里逐个 await
+const writeTasks: Promise<void>[] = [];
+for (const field of fields) {
+  // ... 计算 key / value ...
+  writeTasks.push(fetchSyncPost("/api/av/setAttributeViewBlockAttr", {...}).then(...));
+}
+await Promise.all(writeTasks);
+```
+
+`createTargetDatabaseFromSettings`（新建/重建库）里要把 `cachedDb` 置 `null` 失效，否则会读到旧结构。
+
 ## 开发
 
 ```bash

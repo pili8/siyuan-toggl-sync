@@ -58,7 +58,7 @@ const DEFAULT_CONFIG: PluginConfig = {
 };
 
 const CONFIG_FILE = "toggl-sync.json";
-const PLUGIN_VERSION = "0.5.0";
+const PLUGIN_VERSION = "0.5.1";
 
 type AttributeViewKey = {
     id: string;
@@ -195,6 +195,11 @@ export default class TogglSyncPlugin extends Plugin {
     private lastEntryId: number | null = null;
     private suppressDatabasePrompt = false;
     private workspaceIdPromise: Promise<number | null> | null = null;
+
+    // 同一次使用内，目标数据库结构（avId + 字段）不会变，缓存以避免每次启动都重做库结构校验
+    private cachedDb: TargetDatabase | null = null;
+    private cachedDbDocId = "";
+    private cachedDbAvId = "";
     // 启动计时时后台创建云端计时器的 Promise；停止时若仍在创建中需 await 它拿到真实 id
     private startCloudPromise: Promise<TimeEntry | null> | null = null;
     // 标记用户是否在云端计时器创建期间点了“停止”，防止后台把 currentTimer 复活成运行中
@@ -1351,6 +1356,13 @@ export default class TogglSyncPlugin extends Plugin {
     }
 
     private async getTargetDatabase(): Promise<TargetDatabase | null> {
+        // 同一次使用内库结构不变，命中缓存直接返回，省去每次启动的 sql + 字段重读 RPC
+        if (this.cachedDb
+            && this.cachedDbDocId === this.config.targetDocId
+            && this.cachedDbAvId === (this.config.avId || "")) {
+            return this.cachedDb;
+        }
+
         const avId = await this.findOrMountTargetDatabase();
         if (!avId) {
             if (!this.suppressDatabasePrompt) {
@@ -1369,7 +1381,12 @@ export default class TogglSyncPlugin extends Plugin {
         const keys = await this.ensureDatabaseFields(avId);
         await this.ensureSyncStatusOptions({avId, keys});
 
-        return {avId, keys};
+        const result = {avId, keys};
+        // 写回缓存（仅当本次成功拿到结构）
+        this.cachedDb = result;
+        this.cachedDbDocId = this.config.targetDocId || "";
+        this.cachedDbAvId = (this.config.avId || "");
+        return result;
     }
 
     private async findOrMountTargetDatabase(): Promise<string | null> {
@@ -1410,6 +1427,8 @@ export default class TogglSyncPlugin extends Plugin {
             showMessage("请先配置目标文档 ID", 4000, "error");
             return;
         }
+        // 库结构将发生变化，失效缓存以便下次重新读取
+        this.cachedDb = null;
 
         const existingAvId = await this.findOrMountTargetDatabase();
         if (existingAvId) {
@@ -1816,6 +1835,7 @@ export default class TogglSyncPlugin extends Plugin {
         ];
 
         const writtenKeyIds = new Set<string>();
+        const writeTasks: Promise<void>[] = [];
         for (const field of fields) {
             let key = this.findKey(database.keys, field.aliases);
             // 描述字段降级到思源默认主文本键
@@ -1828,19 +1848,22 @@ export default class TogglSyncPlugin extends Plugin {
 
             const value = this.buildCellValue(key, rowId, field.value);
             if (!value) continue;
+            writtenKeyIds.add(key.id);
 
-            const result = await fetchSyncPost("/api/av/setAttributeViewBlockAttr", {
+            // 并行写入各字段（不同 key 互相独立），避免逐个 await 造成的串行往返累积
+            const task = fetchSyncPost("/api/av/setAttributeViewBlockAttr", {
                 avID: database.avId,
                 keyID: key.id,
                 itemID: rowId,
                 value,
+            }).then((result) => {
+                if (result.code !== 0) {
+                    console.error("[TogglSync] setAttributeViewBlockAttr failed:", key!.name, JSON.stringify(result));
+                }
             });
-            if (result.code !== 0) {
-                console.error("[TogglSync] setAttributeViewBlockAttr failed:", key.name, JSON.stringify(result));
-            } else {
-                writtenKeyIds.add(key.id);
-            }
+            writeTasks.push(task);
         }
+        await Promise.all(writeTasks);
     }
 
     private async writeTogglId(database: TargetDatabase, rowId: string, togglId: number): Promise<void> {
