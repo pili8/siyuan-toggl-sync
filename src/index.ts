@@ -58,7 +58,7 @@ const DEFAULT_CONFIG: PluginConfig = {
 };
 
 const CONFIG_FILE = "toggl-sync.json";
-const PLUGIN_VERSION = "0.4.4";
+const PLUGIN_VERSION = "0.5.0";
 
 type AttributeViewKey = {
     id: string;
@@ -195,6 +195,10 @@ export default class TogglSyncPlugin extends Plugin {
     private lastEntryId: number | null = null;
     private suppressDatabasePrompt = false;
     private workspaceIdPromise: Promise<number | null> | null = null;
+    // 启动计时时后台创建云端计时器的 Promise；停止时若仍在创建中需 await 它拿到真实 id
+    private startCloudPromise: Promise<TimeEntry | null> | null = null;
+    // 标记用户是否在云端计时器创建期间点了“停止”，防止后台把 currentTimer 复活成运行中
+    private stopDuringStart = false;
 
     async onload() {
         await this.loadConfig();
@@ -996,22 +1000,25 @@ export default class TogglSyncPlugin extends Plugin {
         };
 
         // ④ 本地数据已落库，返回 true（弹窗随后关闭）；联网部分转入后台
-        this.finishStartTogglTimerCloud({input, start, database, localRowId, prevTimer});
+        this.startCloudPromise = this.finishStartTogglTimerCloud({input, start, database, localRowId, prevTimer});
 
         return true;
     }
 
+    // 后台创建云端计时器。返回创建成功的 TimeEntry；失败或 API 禁用返回 null。
+    // 若执行期间用户点了“停止”（this.stopDuringStart=true），则只返回条目、不刷新成“运行中”，
+    // 交由 stopCurrentTimer 负责停止云端并写本地停止信息，避免留下孤儿计时器。
     private finishStartTogglTimerCloud(ctx: {
         input: {description: string; projectId?: number; tags: string[]};
         start: Date;
         database: TargetDatabase | null;
         localRowId: string | null;
         prevTimer: any | null;
-    }) {
-        if (this.config.apiEnabled === false) return;
-        (async () => {
+    }): Promise<TimeEntry | null> {
+        if (this.config.apiEnabled === false) return Promise.resolve(null);
+        return (async () => {
             const workspaceId = await this.ensureWorkspaceId();
-            if (!workspaceId) return;
+            if (!workspaceId) return null;
 
             // 云端停止之前运行中的计时器
             if (ctx.prevTimer && ctx.prevTimer.id !== 0) {
@@ -1026,53 +1033,54 @@ export default class TogglSyncPlugin extends Plugin {
                 }
             }
 
-            // 传新计时到云端
-            this.pushTimerToToggl({workspaceId, input: ctx.input, start: ctx.start, database: ctx.database, localRowId: ctx.localRowId});
-        })().catch((e) => {
-            console.warn("[TogglSync] finishStartTogglTimerCloud failed:", e);
-        });
-    }
-
-    private pushTimerToToggl(params: {
-        workspaceId: number;
-        input: {description: string; projectId?: number; tags: string[]};
-        start: Date;
-        database: TargetDatabase | null;
-        localRowId: string | null;
-    }) {
-        const {workspaceId, input, start, database, localRowId} = params;
-        (async () => {
-            if (this.config.apiEnabled === false) return;
+            // 创建新的云端计时器
             const createBody: any = {
                 workspace_id: workspaceId,
-                description: input.description || "无描述",
-                start: start.toISOString(),
+                description: ctx.input.description || "无描述",
+                start: ctx.start.toISOString(),
                 duration: -1,
                 created_with: "siyuan-toggl-sync",
             };
-            if (input.projectId !== undefined) {
-                createBody.project_id = input.projectId;
+            if (ctx.input.projectId !== undefined) {
+                createBody.project_id = ctx.input.projectId;
             }
-            if (input.tags.length > 0) {
-                createBody.tags = input.tags;
+            if (ctx.input.tags.length > 0) {
+                createBody.tags = ctx.input.tags;
                 createBody.tag_action = "add";
             }
             const response = await togglApi.createTimeEntry(workspaceId, createBody);
-
             if (!response.ok) {
-                // 失败：本地行保持"本地待上传"，下次同步推送
                 showMessage("上传 Toggl 失败，已保留本地记录", 3000, "error");
-                return;
+                return null;
+            }
+            const entry = response.data;
+
+            // 用户在创建云端计时器的过程中点了停止：不要把状态刷新成“运行中”，
+            // 把真实条目交回 stopCurrentTimer，由它停止云端并写本地停止信息。
+            if (this.stopDuringStart) {
+                return entry;
             }
 
-            // 成功：只更新 togglId 和同步状态，不覆盖本地已设置的项目/标签
-            if (database && localRowId) {
-                await this.writeTogglId(database, localRowId, response.data.id);
-                await this.writeSyncStatus(database, localRowId, "正常");
+            // 正常：写入 togglId + 状态“正常”，并刷新 currentTimer
+            if (ctx.database && ctx.localRowId) {
+                // 防止快速连续“开始”时旧的后台创建结果覆盖新的 currentTimer
+                const stillCurrent = this.config.currentTimer
+                    && this.config.currentTimer.localRowId === ctx.localRowId;
+                if (stillCurrent) {
+                    await this.writeTogglId(ctx.database, ctx.localRowId, entry.id);
+                    await this.writeSyncStatus(ctx.database, ctx.localRowId, "正常");
+                    await this.updateCurrentTimerFromEntry(entry, ctx.input.projectId, ctx.input.tags);
+                } else {
+                    // 当前计时器已被新的开始替代或清空：只回填 togglId，不再刷新 currentTimer
+                    await this.writeTogglId(ctx.database, ctx.localRowId, entry.id);
+                }
             }
-            await this.updateCurrentTimerFromEntry(response.data, input.projectId, input.tags);
+            this.startCloudPromise = null;
+            return entry;
         })().catch((e) => {
-            console.warn("[TogglSync] pushTimerToToggl failed:", e);
+            console.warn("[TogglSync] finishStartTogglTimerCloud failed:", e);
+            this.startCloudPromise = null;
+            return null;
         });
     }
 
@@ -1175,33 +1183,59 @@ export default class TogglSyncPlugin extends Plugin {
             return;
         }
 
+        let realId = prevTimer.id;
+        let workspaceIdForStop = prevTimer.workspaceId || 0;
+        const apiEnabled = this.config.apiEnabled !== false;
+
+        // ① 若云端计时器仍在创建中（currentTimer.id 还是 0），先等它创建完成，
+        //    拿到真实的 Toggl id 才能去停止，否则会留下一个永远运行的孤儿计时器。
+        if (prevTimer.id === 0 && this.startCloudPromise) {
+            this.stopDuringStart = true;
+            const entry = await this.startCloudPromise;
+            this.startCloudPromise = null;
+            this.stopDuringStart = false;
+            if (entry) {
+                realId = entry.id;
+                workspaceIdForStop = entry.workspace_id;
+                // 把真实 togglId 写回本地行，保证能关联并正确停止
+                if (prevTimer.localRowId && prevTimer.databaseAvId) {
+                    const database = await this.getTargetDatabase();
+                    if (database) {
+                        await this.writeTogglId(database, prevTimer.localRowId, entry.id);
+                    }
+                }
+            }
+        } else if (this.startCloudPromise) {
+            // 云端已创建完成（currentTimer.id 已是真实值），清空挂起的 promise
+            this.startCloudPromise = null;
+        }
+
         const stopTime = new Date();
         const elapsed = Math.max(0, Math.round((stopTime.getTime() - new Date(prevTimer.start).getTime()) / 1000));
 
-        const newStatus = prevTimer.id !== 0 ? "Toggl 待更新" : "本地待上传";
-        const apiEnabled = this.config.apiEnabled !== false;
+        const newStatus = realId !== 0 ? "Toggl 待更新" : "本地待上传";
 
-        // ① 更新本地行的停止信息（仅当已有本地行）
+        // ② 更新本地行的停止信息（仅当已有本地行）
         if (prevTimer.localRowId && prevTimer.databaseAvId) {
             await this.updateLocalTimerStop(prevTimer.databaseAvId, prevTimer.localRowId, stopTime, elapsed, newStatus);
         }
 
-        // ② 停止云端计时器（只调一次，避免重复消耗配额）
-        if (prevTimer.id !== 0 && apiEnabled) {
-            const workspaceId = await this.ensureWorkspaceId();
+        // ③ 停止云端计时器（只调一次，避免重复消耗配额）
+        if (realId !== 0 && apiEnabled) {
+            const workspaceId = workspaceIdForStop || await this.ensureWorkspaceId();
             if (workspaceId) {
                 try {
                     if (!prevTimer.localRowId) {
                         // 没有本地行：直接停止，再把停止后的条目写回本地
-                        const stopResult = await togglApi.stopTimeEntry(workspaceId, prevTimer.id);
+                        const stopResult = await togglApi.stopTimeEntry(workspaceId, realId);
                         if (stopResult.ok && stopResult.data && this.config.targetDocId) {
                             await this.addEntries([stopResult.data]);
                         }
                     } else {
                         // 有本地行：确认仍在运行再停止（一次 getCurrentTimeEntry + 一次 stopTimeEntry）
                         const current = await togglApi.getCurrentTimeEntry();
-                        if (current.ok && (current.data as any)?.id === prevTimer.id) {
-                            await togglApi.stopTimeEntry(workspaceId, prevTimer.id);
+                        if (current.ok && (current.data as any)?.id === realId) {
+                            await togglApi.stopTimeEntry(workspaceId, realId);
                         }
                     }
                 } catch {
@@ -1210,8 +1244,10 @@ export default class TogglSyncPlugin extends Plugin {
             }
         }
 
-        // ③ 清理 pending 的 start 操作
+        // ④ 清理 pending 的 start 操作
         this.config.pendingOps = this.config.pendingOps.filter(op => op.type !== "start");
+        this.startCloudPromise = null;
+        this.stopDuringStart = false;
         await this.clearCurrentTimer();
 
         const msg = elapsed > 0

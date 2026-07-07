@@ -160,6 +160,16 @@ if (isEmptyCellInput(field.value) && key.type !== "select" && key.type !== "mSel
 
 `stopCurrentTimer` 的云端停止逻辑必须合并为一次：无本地行时直接 `stopTimeEntry`；有本地行时先 `getCurrentTimeEntry` 确认仍在运行再 `stopTimeEntry`。不要对同一个计时器既走「无本地行」分支又走「有本地行」分支，否则会重复消耗免费版配额。
 
+### 开始计时后立即停止：云端计时器创建必须可等待
+
+`startTogglTimer` 在写本地库后把 `currentTimer.id` 记为 `0`（本地占位），真正的云端计时器在后台由 `finishStartTogglTimerCloud` 异步创建。**不要在创建完成前就关闭/返回**，并且 `stopCurrentTimer` 必须能感知「云端仍在创建中」：
+
+- `startTogglTimer` 把 `finishStartTogglTimerCloud(...)` 返回的 Promise 存入 `this.startCloudPromise`；
+- `stopCurrentTimer` 若发现 `currentTimer.id === 0 && this.startCloudPromise`，先 `await this.startCloudPromise` 拿到真实 Toggl id，再去 `stopTimeEntry`，否则会留下一个永远运行的「孤儿」云端计时器；
+- `finishStartTogglTimerCloud` 内部用 `this.stopDuringStart` 标志判断：若用户在创建期间点了停止，则只返回条目、不调用 `updateCurrentTimerFromEntry`，避免把 `currentTimer` 复活成「运行中」。
+
+**原因**：开始与停止之间的时间差里，云端条目可能尚未创建完成；此时 `currentTimer.id` 仍是 `0`，`stopCurrentTimer` 会误以为「还没推到云端」而跳过云端停止，等后台创建完成时又把 `currentTimer` 复活成真实运行中的条目，造成孤儿计时器。
+
 ### 同步时不要每次刷新项目/标签
 
 `refreshProjects` / `refreshTags` 已加 10 分钟时间缓存（基于 `projectsRefreshedAt` / `tagsRefreshedAt`）。修改相关逻辑时保持「非 force 且缓存未过期则跳过」的判断，避免每次同步都拉 Toggl API 浪费配额。
