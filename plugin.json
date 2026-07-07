@@ -2,25 +2,22 @@
   "name": "siyuan-toggl-sync",
   "author": "gm",
   "url": "https://github.com/pili8/siyuan-toggl-sync",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "minAppVersion": "3.7.0",
   "backends": ["windows", "linux", "darwin", "docker"],
   "frontends": ["desktop", "browser-desktop"],
-  "displayName": {
-    "default": "Toggl Sync",
-    "zh_CN": "Toggl 同步",
-    "zh-CN": "Toggl 同步"
-  },
-  "description": {
-    "default": "Sync Toggl time entries to SiYuan database",
-    "zh_CN": "将 Toggl 时间记录同步到思源数据库",
-    "zh-CN": "将 Toggl 时间记录同步到思源数据库"
-  },
-  "readme": {
-    "default": "README.md",
-    "zh_CN": "README_zh_CN.md",
-    "zh-CN": "README_zh_CN.md"
-  },
+    "displayName": {
+        "default": "Toggl Sync",
+        "zh-CN": "Toggl 同步"
+    },
+    "description": {
+        "default": "Sync Toggl time entries to SiYuan database",
+        "zh-CN": "将 Toggl 时间记录同步到思源数据库"
+    },
+    "readme": {
+        "default": "README.md",
+        "zh-CN": "README_zh_CN.md"
+    },
   "funding": {
     "openCollective": "",
     "patreon": "",

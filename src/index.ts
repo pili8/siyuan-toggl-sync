@@ -35,6 +35,8 @@ interface PluginConfig {
     lastProjectId?: number;
     lastTags?: string[];
     apiEnabled?: boolean;
+    projectsRefreshedAt?: string;
+    tagsRefreshedAt?: string;
 }
 
 const DEFAULT_CONFIG: PluginConfig = {
@@ -51,10 +53,12 @@ const DEFAULT_CONFIG: PluginConfig = {
     currentTimer: null,
     pendingOps: [],
     apiEnabled: true,
+    projectsRefreshedAt: "",
+    tagsRefreshedAt: "",
 };
 
 const CONFIG_FILE = "toggl-sync.json";
-const PLUGIN_VERSION = "0.4.2";
+const PLUGIN_VERSION = "0.4.3";
 
 type AttributeViewKey = {
     id: string;
@@ -1137,13 +1141,10 @@ export default class TogglSyncPlugin extends Plugin {
     }
 
     private async stopCurrentTimer() {
-        if (!this.config.token) {
+        if (this.config.apiEnabled !== false && !this.config.token) {
             showMessage("请先配置 Toggl API Token", 4000, "error");
             return;
         }
-
-        const workspaceId = await this.ensureWorkspaceId();
-        if (!workspaceId) return;
 
         const prevTimer = this.config.currentTimer;
         if (!prevTimer) {
@@ -1155,35 +1156,38 @@ export default class TogglSyncPlugin extends Plugin {
         const elapsed = Math.max(0, Math.round((stopTime.getTime() - new Date(prevTimer.start).getTime()) / 1000));
 
         const newStatus = prevTimer.id !== 0 ? "Toggl 待更新" : "本地待上传";
+        const apiEnabled = this.config.apiEnabled !== false;
 
-        // ① 更新本地行的停止信息
+        // ① 更新本地行的停止信息（仅当已有本地行）
         if (prevTimer.localRowId && prevTimer.databaseAvId) {
             await this.updateLocalTimerStop(prevTimer.databaseAvId, prevTimer.localRowId, stopTime, elapsed, newStatus);
-        } else if (!prevTimer.localRowId && prevTimer.id !== 0 && this.config.apiEnabled !== false) {
-            // ② 没有本地行但已推送到 Toggl（云端计时器）：停止后写入本地
-            try {
-                const stopResult = await togglApi.stopTimeEntry(workspaceId, prevTimer.id);
-                if (stopResult.ok && this.config.targetDocId) {
-                    await this.addEntries([stopResult.data]);
+        }
+
+        // ② 停止云端计时器（只调一次，避免重复消耗配额）
+        if (prevTimer.id !== 0 && apiEnabled) {
+            const workspaceId = await this.ensureWorkspaceId();
+            if (workspaceId) {
+                try {
+                    if (!prevTimer.localRowId) {
+                        // 没有本地行：直接停止，再把停止后的条目写回本地
+                        const stopResult = await togglApi.stopTimeEntry(workspaceId, prevTimer.id);
+                        if (stopResult.ok && stopResult.data && this.config.targetDocId) {
+                            await this.addEntries([stopResult.data]);
+                        }
+                    } else {
+                        // 有本地行：确认仍在运行再停止（一次 getCurrentTimeEntry + 一次 stopTimeEntry）
+                        const current = await togglApi.getCurrentTimeEntry();
+                        if (current.ok && (current.data as any)?.id === prevTimer.id) {
+                            await togglApi.stopTimeEntry(workspaceId, prevTimer.id);
+                        }
+                    }
+                } catch {
+                    // API 失败不阻塞，本地已更新，等下次同步
                 }
-            } catch {
-                // 云端停止失败，本地也无法记录（没有 rowId）
             }
         }
 
-        // ③ 尝试通过 API 推送停止操作（如果有 togglId）
-        if (prevTimer.id !== 0 && this.config.apiEnabled !== false) {
-            try {
-                const current = await togglApi.getCurrentTimeEntry();
-                if (current.ok && (current.data as any)?.id === prevTimer.id) {
-                    await togglApi.stopTimeEntry(workspaceId, prevTimer.id);
-                }
-            } catch {
-                // API 失败不阻塞，本地已更新，等下次同步
-            }
-        }
-
-        // ④ 清理 pending 的 start 操作
+        // ③ 清理 pending 的 start 操作
         this.config.pendingOps = this.config.pendingOps.filter(op => op.type !== "start");
         await this.clearCurrentTimer();
 
@@ -1890,6 +1894,11 @@ export default class TogglSyncPlugin extends Plugin {
             let localRows = await this.readLocalDatabaseRows(database);
             // 回填缺失的同步状态（纯写，不在 read 函数中做）
             await this.backfillSyncStatus(database, localRows);
+            // 检测重复 TogglID，避免产生永久孤儿行
+            const dupMarked = await this.detectDuplicateTogglIds(database, localRows);
+            if (dupMarked > 0) {
+                showMessage(`检测到 ${dupMarked} 条重复 TogglID，已标记为「本地可删除」`, 4000, "info");
+            }
             const localResult = await this.pushLocalChanges(database, localRows);
             if (localResult.created > 0 || localResult.updated > 0 || localResult.deleted > 0) {
                 localRows = await this.readLocalDatabaseRows(database);
@@ -1990,6 +1999,7 @@ export default class TogglSyncPlugin extends Plugin {
         for (const p of this.config.projectCache) {
             this.projects.set(p.id, p.name);
         }
+        this.config.projectsRefreshedAt = new Date().toISOString();
         await this.saveConfig();
         await this.syncFieldOptions(["项目", "Project"], Array.from(this.projects.values()));
         showMessage(`已刷新 Toggl 项目列表: ${this.projects.size} 个${this.formatQuotaText(res)}`, 3000, "info");
@@ -2013,14 +2023,23 @@ export default class TogglSyncPlugin extends Plugin {
                 workspace_id: tag.workspace_id || workspaceId,
             }));
         this.loadTagCache();
+        this.config.tagsRefreshedAt = new Date().toISOString();
         await this.saveConfig();
         await this.syncFieldOptions(["标签", "Tags", "Tag"], this.tags);
         showMessage(`已刷新 Toggl 标签列表: ${this.tags.length} 个${this.formatQuotaText(res)}`, 3000, "info");
     }
 
+    private isCacheFresh(ts?: string, maxAgeMs = 10 * 60 * 1000): boolean {
+        if (!ts) return false;
+        const t = new Date(ts).getTime();
+        return Number.isFinite(t) && Date.now() - t < maxAgeMs;
+    }
+
     private refreshProjects(force = false): Promise<void> {
         if (!this.config.token) return Promise.resolve();
-        if (!force && this.projects.size > 0) return Promise.resolve();
+        if (!force && this.projects.size > 0 && this.isCacheFresh(this.config.projectsRefreshedAt)) {
+            return Promise.resolve();
+        }
         if (!force && this.projectsLoadPromise) return this.projectsLoadPromise;
 
         this.projectsLoadPromise = this.loadProjects().then(() => {
@@ -2033,7 +2052,9 @@ export default class TogglSyncPlugin extends Plugin {
 
     private refreshTags(force = false): Promise<void> {
         if (!this.config.token) return Promise.resolve();
-        if (!force && this.tags.length > 0) return Promise.resolve();
+        if (!force && this.tags.length > 0 && this.isCacheFresh(this.config.tagsRefreshedAt)) {
+            return Promise.resolve();
+        }
         if (!force && this.tagsLoadPromise) return this.tagsLoadPromise;
 
         this.tagsLoadPromise = this.loadTags().then(() => {
@@ -2132,7 +2153,7 @@ export default class TogglSyncPlugin extends Plugin {
         const result: RemoteApplyResult = {added: 0, updated: 0, markedDeleted: 0, skippedPending: 0};
         const rowsByTogglId = new Map<number, LocalDatabaseRow>();
         for (const row of localRows) {
-            if (row.togglId) rowsByTogglId.set(row.togglId, row);
+            if (row.togglId && row.syncStatus !== "本地可删除") rowsByTogglId.set(row.togglId, row);
         }
 
         for (const entry of entries) {
@@ -2675,6 +2696,35 @@ export default class TogglSyncPlugin extends Plugin {
                 await this.writeSyncStatus(database, row.rowId, "未同步");
             }
         }
+    }
+
+    // 检测重复的 TogglID：保留最佳行，其余标记为「本地可删除」避免成为永久孤儿
+    private async detectDuplicateTogglIds(database: TargetDatabase, rows: LocalDatabaseRow[]): Promise<number> {
+        const byId = new Map<number, LocalDatabaseRow[]>();
+        for (const row of rows) {
+            if (!row.togglId) continue;
+            const arr = byId.get(row.togglId) ?? [];
+            arr.push(row);
+            byId.set(row.togglId, arr);
+        }
+
+        let marked = 0;
+        for (const group of byId.values()) {
+            if (group.length < 2) continue;
+            // 保留最佳行：优先「正常」，其次有完整数据，再次第一条
+            let keepIdx = group.findIndex((r) => r.syncStatus === "正常");
+            if (keepIdx === -1) keepIdx = group.findIndex((r) => this.isMeaningfulLocalRow(r));
+            if (keepIdx === -1) keepIdx = 0;
+            for (let i = 0; i < group.length; i++) {
+                if (i === keepIdx) continue;
+                const dup = group[i];
+                if (dup.syncStatus === "本地可删除") continue;
+                await this.writeSyncStatus(database, dup.rowId, "本地可删除");
+                dup.syncStatus = "本地可删除";
+                marked++;
+            }
+        }
+        return marked;
     }
 
     private isMeaningfulLocalRow(row: LocalDatabaseRow): boolean {
