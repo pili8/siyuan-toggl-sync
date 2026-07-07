@@ -62,7 +62,7 @@
   &__settings {
     max-height: calc(100vh - 180px);
     overflow-y: auto;
-    padding: 18px 20px;
+    padding: 16px 18px;
     background: var(--b3-theme-background);
     overscroll-behavior: contain;
 
@@ -78,205 +78,164 @@
       left: 16px;
       font-size: 11px;
       color: var(--b3-theme-on-surface-light);
-      opacity: 0.5;
+      opacity: .5;
+    }
+  }
+
+  // ===== Settings card =====
+  &__card {
+    padding: 16px 18px;
+    margin-bottom: 12px;
+    border: 1px solid var(--b3-border-color);
+    border-radius: 8px;
+    background: var(--b3-theme-surface);
+
+    &:last-child { margin-bottom: 0; }
+
+    &--aux {
+      opacity: .78;
     }
 
-    &-section {
-      padding: 14px 16px 16px;
-      margin-bottom: 14px;
-      border: 1px solid var(--b3-border-color);
-      border-radius: 8px;
-      background: var(--b3-theme-surface);
-
-      &:last-child {
-        margin-bottom: 0;
-      }
-    }
-
-    &-section-title {
+    &-header {
       font-size: 13px;
-      font-weight: 700;
+      font-weight: 600;
       color: var(--b3-theme-on-surface);
       margin-bottom: 14px;
-      padding-bottom: 8px;
-      border-bottom: 1px solid var(--b3-border-color);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      opacity: 0.85;
+      padding-left: 10px;
+      border-left: 3px solid var(--b3-theme-primary-light, #8ab4f8);
     }
 
-    &-grid {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      gap: 14px 12px;
+    &-body {
+      // flow content
     }
+  }
 
-    &-field {
+  // ===== Fields =====
+  &__field {
+    min-width: 0;
+    margin-bottom: 14px;
+
+    &:last-child { margin-bottom: 0; }
+
+    &--half {
+      flex: 1;
       min-width: 0;
-      margin-bottom: 12px;
-
-      &:last-child {
-        margin-bottom: 0;
-      }
-
-      &--wide {
-        grid-column: 1 / -1;
-      }
-    }
-
-    &-label {
-      display: block;
-      margin-bottom: 6px;
-      font-weight: 500;
-      font-size: 13px;
-      color: var(--b3-theme-on-surface);
-    }
-
-    &-desc {
-      margin-top: 4px;
-      font-size: 12px;
-      color: var(--b3-theme-on-surface-light);
+      margin-bottom: 0;
     }
 
     &-row {
       display: flex;
-      align-items: center;
-      gap: 8px;
-      min-width: 0;
+      gap: 16px;
+      align-items: flex-start;
+      flex-wrap: wrap;
     }
 
-    &-input {
-      flex: 1;
-      min-width: 0;
-    }
-
-    &-control {
-      width: 100%;
-      min-width: 0;
-    }
-
-    &-action {
-      flex: 0 0 auto;
-      white-space: nowrap;
-    }
-
-    &-meta {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
+    &-label {
+      display: block;
       font-size: 12px;
+      font-weight: 500;
+      color: var(--b3-theme-on-surface-light);
+      margin-bottom: 4px;
+    }
+
+    &-hint {
+      font-size: 12px;
+      color: var(--b3-theme-on-surface-light);
+      margin-top: 4px;
+    }
+  }
+
+  // ===== Input rows =====
+  &__input-row {
+    display: flex;
+    gap: 8px;
+
+    & > input { flex: 1; min-width: 0; }
+    & > button { flex-shrink: 0; }
+  }
+
+  // ===== Full-width fields =====
+  .b3-text-field,
+  .b3-select {
+    max-width: 100%;
+  }
+
+  &__input-wide {
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  // ===== Button row =====
+  &__btn-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  &__btn-block {
+    width: 100%;
+  }
+
+  // ===== Switch =====
+  &__switch {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+  }
+
+  // ===== Meta line (last-sync) =====
+  &__meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    margin-bottom: 12px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--b3-theme-background);
+
+    &-key {
       color: var(--b3-theme-on-surface-light);
     }
 
     &-value {
-      color: var(--b3-theme-on-surface-light);
-      word-break: break-all;
-    }
-
-    &-small-action {
-      flex: 0 0 auto;
-      padding: 2px 8px;
-      font-size: 12px;
-    }
-
-    &-button-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-
-    &-switch {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      cursor: pointer;
-    }
-
-    // 维护操作：带说明的卡片，目标更大、不易误点
-    &-action-list {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      margin-top: 12px;
-    }
-
-    &-action-card {
-      display: flex;
-      flex-direction: column;
-      align-items: flex-start;
-      gap: 2px;
-      text-align: left;
-      padding: 10px 12px;
-      border: 1px solid var(--b3-border-color);
-      border-radius: 6px;
-      background: var(--b3-theme-background);
-      cursor: pointer;
-      transition: border-color 0.15s, background 0.15s;
-
-      &:hover {
-        border-color: var(--b3-theme-primary);
-        background: var(--b3-theme-surface);
-      }
-    }
-
-    &-action-title {
-      font-size: 13px;
-      font-weight: 600;
       color: var(--b3-theme-on-surface);
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
-    &-action-desc {
-      font-size: 11px;
-      line-height: 1.4;
-      color: var(--b3-theme-on-surface-light);
-    }
-
-    &-action-card--danger {
-      border-color: rgba(229, 57, 53, 0.35);
-
-      &:hover {
-        border-color: #e53935;
-        background: rgba(229, 57, 53, 0.06);
-      }
-
-      .toggl-sync__action-title {
-        color: #e53935;
-      }
-    }
-
-    // 清空同步时间：低调的文字按钮，避免与维护卡片混淆
-    &-link {
-      flex: 0 0 auto;
-      padding: 2px 4px;
+    &-action {
+      flex-shrink: 0;
       font-size: 12px;
-      color: var(--b3-theme-on-surface-light);
-      text-decoration: underline;
-
-      &:hover {
-        color: #e53935;
-      }
     }
+  }
 
-    // 诊断区降权：虚线边框 + 弱化，明确「仅排障用」
-    &-section--advanced {
-      border-style: dashed;
-      opacity: 0.94;
-    }
+  // ===== Debug output =====
+  &__debug-output {
+    margin-top: 10px;
+    padding: 10px 12px;
+    font-family: var(--b3-font-family-code);
+    font-size: 11px;
+    line-height: 1.55;
+    color: var(--b3-theme-on-surface-light);
+    background: var(--b3-theme-background);
+    border: 1px solid var(--b3-border-color);
+    border-radius: 6px;
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre-line;
 
-    &-tag {
-      font-size: 10px;
-      font-weight: 600;
-      padding: 1px 6px;
-      border-radius: 8px;
-      background: var(--b3-theme-on-surface-light);
-      color: var(--b3-theme-background);
-      letter-spacing: 0;
-      text-transform: none;
-      vertical-align: middle;
-      opacity: 0.7;
-      margin-left: 4px;
+    &:empty {
+      margin-top: 0;
+      padding: 0;
+      border: none;
     }
+  }
+
+  &__text-warn {
+    color: var(--b3-theme-error, #e53935);
   }
 
   &__dialog-row {

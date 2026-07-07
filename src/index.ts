@@ -58,7 +58,7 @@ const DEFAULT_CONFIG: PluginConfig = {
 };
 
 const CONFIG_FILE = "toggl-sync.json";
-const PLUGIN_VERSION = "0.5.2";
+const PLUGIN_VERSION = "0.5.3";
 
 type AttributeViewKey = {
     id: string;
@@ -377,130 +377,126 @@ export default class TogglSyncPlugin extends Plugin {
         const dialog = new Dialog({
             title: "Toggl Sync - " + this.i18n.settings,
             content: `<div class="toggl-sync__settings">
-                <div class="toggl-sync__settings-section">
-                    <div class="toggl-sync__settings-section-title">连接</div>
-                    <div class="toggl-sync__settings-field">
-                        <label class="toggl-sync__settings-label">${this.i18n.token}</label>
-                        <div class="toggl-sync__settings-row">
-                            <input id="ts-token" class="b3-text-field toggl-sync__settings-input" type="password" placeholder="Toggl API Token" value="${
+                <div class="toggl-sync__card">
+                    <div class="toggl-sync__card-header">连接</div>
+                    <div class="toggl-sync__card-body">
+                        <div class="toggl-sync__field">
+                            <div class="toggl-sync__field-label">${this.i18n.token}</div>
+                            <div class="toggl-sync__input-row">
+                                <input id="ts-token" class="b3-text-field" type="password" placeholder="Toggl API Token" value="${
                 this.escapeHtml(this.config.token)
             }">
-                            <button id="ts-verify" class="b3-button b3-button--outline toggl-sync__settings-action" type="button">${this.i18n.tokenVerify}</button>
+                                <button id="ts-verify" class="b3-button b3-button--outline" type="button">${this.i18n.tokenVerify}</button>
+                            </div>
+                            <div class="toggl-sync__field-hint">${this.i18n.tokenDesc}</div>
                         </div>
-                        <div class="toggl-sync__settings-desc">${this.i18n.tokenDesc}</div>
-                    </div>
-                    <div class="toggl-sync__settings-field">
-                        <label class="toggl-sync__settings-switch">
-                            <input id="ts-api-enabled" type="checkbox" class="b3-switch" ${
+                        <div class="toggl-sync__field">
+                            <label class="toggl-sync__switch">
+                                <input id="ts-api-enabled" type="checkbox" class="b3-switch" ${
                 this.config.apiEnabled !== false ? "checked" : ""
             }>
-                            <span>启用 Toggl API</span>
-                        </label>
-                        <div class="toggl-sync__settings-desc">关闭后所有操作仅在本地数据库运行，不上传也不下拉 Toggl。适合排查问题或离线使用。</div>
+                                <span>启用 Toggl API</span>
+                            </label>
+                            <div class="toggl-sync__field-hint">关闭后所有操作仅在本地运行，不上传也不下拉 Toggl</div>
+                        </div>
                     </div>
                 </div>
 
-                <div class="toggl-sync__settings-section">
-                    <div class="toggl-sync__settings-section-title">同步</div>
-                    <div class="toggl-sync__settings-grid">
-                        <div class="toggl-sync__settings-field toggl-sync__settings-field--wide">
-                            <label class="toggl-sync__settings-label">${this.i18n.targetDoc}</label>
-                            <input id="ts-doc" class="b3-text-field toggl-sync__settings-control" placeholder="Document ID" value="${
+                <div class="toggl-sync__card">
+                    <div class="toggl-sync__card-header">同步</div>
+                    <div class="toggl-sync__card-body">
+                        <div class="toggl-sync__field">
+                            <div class="toggl-sync__field-label">${this.i18n.targetDoc}</div>
+                            <input id="ts-doc" class="b3-text-field toggl-sync__input-wide" placeholder="Document ID" value="${
                 this.escapeHtml(this.config.targetDocId)
             }">
-                            <div class="toggl-sync__settings-desc">${this.i18n.targetDocDesc}</div>
+                            <div class="toggl-sync__field-hint">${this.i18n.targetDocDesc}</div>
                         </div>
-                        <div class="toggl-sync__settings-field">
-                            <label class="toggl-sync__settings-label">首次/修复范围</label>
-                            <select id="ts-days" class="b3-select toggl-sync__settings-control">
-                                <option value="7" ${
+                        <div class="toggl-sync__field-row">
+                            <div class="toggl-sync__field toggl-sync__field--half">
+                                <div class="toggl-sync__field-label">首次 / 修复范围</div>
+                                <select id="ts-days" class="b3-select">
+                                    <option value="7" ${
                 this.config.initialDays === 7 ? "selected" : ""
             }>${this.i18n.days7}</option>
-                                <option value="30" ${
+                                    <option value="30" ${
                 this.config.initialDays === 30 ? "selected" : ""
             }>${this.i18n.days30}</option>
-                                <option value="90" ${
+                                    <option value="90" ${
                 this.config.initialDays === 90 ? "selected" : ""
             }>${this.i18n.days90}</option>
-                            </select>
-                            <div class="toggl-sync__settings-desc">受 API 限制，最多 90 天。</div>
-                        </div>
-                        <div class="toggl-sync__settings-field">
-                            <label class="toggl-sync__settings-label">自动同步周期</label>
-                            <select id="ts-auto-sync" class="b3-select toggl-sync__settings-control">
-                                <option value="0" ${this.config.autoSyncMinutes === 0 ? "selected" : ""}>关闭</option>
-                                <option value="15" ${
+                                </select>
+                            </div>
+                            <div class="toggl-sync__field toggl-sync__field--half">
+                                <div class="toggl-sync__field-label">自动同步周期</div>
+                                <select id="ts-auto-sync" class="b3-select">
+                                    <option value="0" ${this.config.autoSyncMinutes === 0 ? "selected" : ""}>关闭</option>
+                                    <option value="15" ${
                 this.config.autoSyncMinutes === 15 ? "selected" : ""
             }>15 分钟</option>
-                                <option value="30" ${
+                                    <option value="30" ${
                 this.config.autoSyncMinutes === 30 ? "selected" : ""
             }>30 分钟</option>
-                                <option value="60" ${
+                                    <option value="60" ${
                 this.config.autoSyncMinutes === 60 ? "selected" : ""
             }>60 分钟</option>
-                            </select>
-                            <div class="toggl-sync__settings-desc">免费版建议 30 分钟。</div>
+                                </select>
+                            </div>
                         </div>
                     </div>
                 </div>
 
-                <div class="toggl-sync__settings-section">
-                    <div class="toggl-sync__settings-section-title">状态栏计时</div>
-                    <div class="toggl-sync__settings-grid">
-                        <div class="toggl-sync__settings-field toggl-sync__settings-field--wide">
-                            <label class="toggl-sync__settings-switch">
+                <div class="toggl-sync__card">
+                    <div class="toggl-sync__card-header">状态栏</div>
+                    <div class="toggl-sync__card-body">
+                        <div class="toggl-sync__field">
+                            <label class="toggl-sync__switch">
                                 <input id="ts-statusbar" type="checkbox" class="b3-switch" ${
                 this.config.statusBarTimer ? "checked" : ""
             }>
                                 <span>${this.i18n.statusBarDesc}</span>
                             </label>
                         </div>
-                        <div class="toggl-sync__settings-field toggl-sync__settings-field--wide">
-                            <label class="toggl-sync__settings-label">${this.i18n.statusText}</label>
-                            <input id="ts-statusbar-text" class="b3-text-field toggl-sync__settings-control" placeholder="Toggl" value="${
+                        <div class="toggl-sync__field">
+                            <div class="toggl-sync__field-label">${this.i18n.statusText}</div>
+                            <input id="ts-statusbar-text" class="b3-text-field" placeholder="Toggl" value="${
                 this.escapeHtml(this.config.statusBarText)
             }">
                         </div>
                     </div>
                 </div>
 
-                <div class="toggl-sync__settings-section">
-                    <div class="toggl-sync__settings-section-title">数据维护</div>
-                    <div class="toggl-sync__settings-meta">
-                        <div>
-                            <div class="toggl-sync__settings-label">${this.i18n.lastSync}</div>
-                            <div id="ts-lastSync" class="toggl-sync__settings-value">${lastSync}</div>
+                <div class="toggl-sync__card">
+                    <div class="toggl-sync__card-header">维护</div>
+                    <div class="toggl-sync__card-body">
+                        <div class="toggl-sync__meta">
+                            <span class="toggl-sync__meta-key">${this.i18n.lastSync}</span>
+                            <span class="toggl-sync__meta-value" id="ts-lastSync">${lastSync}</span>
+                            <button id="ts-clearSync" class="b3-button b3-button--text toggl-sync__meta-action" type="button">清空</button>
                         </div>
-                        <button id="ts-clearSync" class="b3-button b3-button--text toggl-sync__settings-link" type="button">清空同步时间</button>
-                    </div>
-                    <div class="toggl-sync__settings-desc">清空后，下次同步会重新拉取全部历史（最多 90 天）。</div>
-
-                    <div class="toggl-sync__action-list">
-                        <button id="ts-create-db" class="toggl-sync__action-card" type="button">
-                            <span class="toggl-sync__action-title">新建数据库</span>
-                            <span class="toggl-sync__action-desc">在「目标文档」中创建空的 Toggl Sync 数据库</span>
-                        </button>
-                        <button id="ts-repair-sync" class="toggl-sync__action-card" type="button">
-                            <span class="toggl-sync__action-title">首次 / 修复同步</span>
-                            <span class="toggl-sync__action-desc">全量对比云端与本地，本地多出的条目标记为「可删除」</span>
-                        </button>
-                        <button id="ts-clean-local" class="toggl-sync__action-card toggl-sync__action-card--danger" type="button">
-                            <span class="toggl-sync__action-title">清理本地可删除项</span>
-                            <span class="toggl-sync__action-desc">永久删除所有标记为「本地可删除」的行（不可撤销）</span>
-                        </button>
+                        <div class="toggl-sync__btn-row">
+                            <button id="ts-create-db" class="b3-button b3-button--outline" type="button">新建数据库</button>
+                            <button id="ts-repair-sync" class="b3-button b3-button--outline" type="button">首次 / 修复同步</button>
+                            <button id="ts-clean-local" class="b3-button b3-button--outline" type="button">清理本地可删除项</button>
+                        </div>
+                        <div class="toggl-sync__field-hint" style="margin-top:6px;">
+                            <span class="toggl-sync__text-warn">清理操作执行前会弹出二次确认</span>
+                        </div>
                     </div>
                 </div>
 
-                <div class="toggl-sync__settings-section toggl-sync__settings-section--advanced">
-                    <div class="toggl-sync__settings-section-title">诊断 <span class="toggl-sync__tag">仅排障用</span></div>
-                    <div class="toggl-sync__settings-desc">仅当你遇到同步或数据库异常时使用以下工具。</div>
-                    <div class="toggl-sync__settings-button-row">
-                        <button id="ts-diag" class="b3-button b3-button--outline" type="button">网络连接</button>
-                        <button id="ts-debug" class="b3-button b3-button--outline" type="button">数据库状态</button>
-                        <button id="ts-repair-options" class="b3-button b3-button--outline" type="button">修复选项</button>
-                        <button id="ts-debug-copy" class="b3-button b3-button--text" type="button" style="display:none;font-size:12px;">📋 复制</button>
+                <div class="toggl-sync__card toggl-sync__card--aux">
+                    <div class="toggl-sync__card-header">诊断</div>
+                    <div class="toggl-sync__card-body">
+                        <div class="toggl-sync__field-hint" style="margin-top:-4px;margin-bottom:10px;">排查工具 —— 仅遇到异常时使用</div>
+                        <div class="toggl-sync__btn-row">
+                            <button id="ts-diag" class="b3-button b3-button--outline" type="button">网络连接</button>
+                            <button id="ts-debug" class="b3-button b3-button--outline" type="button">数据库状态</button>
+                            <button id="ts-repair-options" class="b3-button b3-button--outline" type="button">修复选项</button>
+                            <button id="ts-debug-copy" class="b3-button b3-button--text" type="button" style="display:none;font-size:12px;">复制</button>
+                        </div>
+                        <div id="ts-debug-result" class="toggl-sync__debug-output"></div>
                     </div>
-                    <div id="ts-debug-result" class="toggl-sync__settings-desc" style="margin-top:6px;white-space:pre-line;font-family:monospace;font-size:11px;max-height:400px;overflow-y:auto;"></div>
                 </div>
             </div>
             <div class="b3-dialog__action toggl-sync__settings-footer">
@@ -509,7 +505,7 @@ export default class TogglSyncPlugin extends Plugin {
                 <div class="fn__space"></div>
                 <button class="b3-button b3-button--text" id="ts-save">${this.i18n.save || "保存"}</button>
             </div>`,
-            width: "560px",
+            width: "580px",
         });
 
         const el = dialog.element;
