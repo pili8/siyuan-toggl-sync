@@ -58,7 +58,7 @@ const DEFAULT_CONFIG: PluginConfig = {
 };
 
 const CONFIG_FILE = "toggl-sync.json";
-const PLUGIN_VERSION = "0.5.3";
+const PLUGIN_VERSION = "0.5.4";
 
 type AttributeViewKey = {
     id: string;
@@ -139,11 +139,10 @@ const TOGGL_DATABASE_FIELDS: DatabaseFieldDefinition[] = [
     {name: "项目", type: "select", aliases: ["项目", "Project"]},
     {name: "标签", type: "mSelect", aliases: ["标签", "Tags", "Tag"]},
     {name: "同步状态", type: "select", aliases: ["同步状态", "Sync Status"]},
-    {name: "开始", type: "date", aliases: ["开始", "开始时间", "Start", "Start Time"]},
-    {name: "结束", type: "date", aliases: ["结束", "结束时间", "End", "End Time", "Stop", "Stop Time"]},
+    {name: "开始时间", type: "date", aliases: ["开始时间", "开始", "Start", "Start Time"]},
+    {name: "结束时间", type: "date", aliases: ["结束时间", "结束", "End", "End Time", "Stop", "Stop Time"]},
     {name: "时长", type: "number", aliases: ["时长", "Duration"]},
     {name: "TogglID", type: "number", aliases: ["TogglID", "Toggl ID", "Toggl Id", "toggl-id"]},
-    {name: "日期", type: "date", aliases: ["日期", "创建日期", "Date"]},
 ];
 
 type PendingOp =
@@ -1837,11 +1836,10 @@ export default class TogglSyncPlugin extends Plugin {
             {aliases: ["项目", "Project"], value: row.projectName},
             {aliases: ["标签", "Tags", "Tag"], value: row.tagNames},
             {aliases: ["同步状态", "Sync Status"], value: row.syncStatus || "正常"},
-            {aliases: ["开始", "开始时间", "Start", "Start Time"], value: row.start},
-            {aliases: ["结束", "结束时间", "End", "End Time", "Stop", "Stop Time"], value: row.stop},
+            {aliases: ["开始时间", "开始", "Start", "Start Time"], value: row.start},
+            {aliases: ["结束时间", "结束", "End", "End Time", "Stop", "Stop Time"], value: row.stop},
             {aliases: ["时长", "Duration"], value: row.durationSeconds},
             {aliases: ["TogglID", "Toggl ID", "Toggl Id", "toggl-id"], value: row.id},
-            {aliases: ["日期", "创建日期", "Date"], value: row.start},
         ];
 
         const writtenKeyIds = new Set<string>();
