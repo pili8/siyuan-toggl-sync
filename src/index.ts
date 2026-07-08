@@ -58,7 +58,7 @@ const DEFAULT_CONFIG: PluginConfig = {
 };
 
 const CONFIG_FILE = "toggl-sync.json";
-const PLUGIN_VERSION = "0.5.4";
+const PLUGIN_VERSION = "0.5.5";
 
 type AttributeViewKey = {
     id: string;
@@ -2240,6 +2240,9 @@ export default class TogglSyncPlugin extends Plugin {
         entries: TimeEntry[],
         localRows: LocalDatabaseRow[],
     ): Promise<RemoteApplyResult> {
+        // 拉取 Toggl 数据前刷新项目列表，避免 project_id 在本地缓存中找不到而退化成数字
+        await this.refreshProjects();
+
         const result: RemoteApplyResult = {added: 0, updated: 0, markedDeleted: 0, skippedPending: 0};
         const rowsByTogglId = new Map<number, LocalDatabaseRow>();
         for (const row of localRows) {
